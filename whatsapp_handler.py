@@ -1,10 +1,11 @@
-import requests
 import os
+
+import requests
+
 from categories import CATEGORIES
 
-WHATSAPP_API_URL = "https://graph.instagram.com/v18.0"
-PHONE_NUMBER_ID = os.getenv('PHONE_NUMBER_ID')
-ACCESS_TOKEN = os.getenv('ACCESS_TOKEN')
+WHATSAPP_API_URL = os.getenv("WHATSAPP_API_URL", "https://graph.facebook.com/v23.0")
+
 
 class WhatsAppHandler:
     def __init__(self, phone_number_id, access_token):
@@ -12,119 +13,73 @@ class WhatsAppHandler:
         self.access_token = access_token
 
     def send_message(self, to_number, message_text):
-        """Envia uma mensagem de texto via WhatsApp"""
+        if not self.phone_number_id or not self.access_token:
+            print("[WhatsApp] PHONE_NUMBER_ID ou ACCESS_TOKEN não configurado")
+            return False
+        url = f"{WHATSAPP_API_URL}/{self.phone_number_id}/messages"
+        headers = {
+            "Authorization": f"Bearer {self.access_token}",
+            "Content-Type": "application/json",
+        }
+        data = {
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": to_number,
+            "type": "text",
+            "text": {"preview_url": False, "body": message_text},
+        }
         try:
-            url = f"{WHATSAPP_API_URL}/{self.phone_number_id}/messages"
-            headers = {
-                "Authorization": f"Bearer {self.access_token}",
-                "Content-Type": "application/json"
-            }
-
-            data = {
-                "messaging_product": "whatsapp",
-                "recipient_type": "individual",
-                "to": to_number,
-                "type": "text",
-                "text": {
-                    "preview_url": False,
-                    "body": message_text
-                }
-            }
-
-            response = requests.post(url, headers=headers, json=data)
-            return response.status_code == 200
-
-        except Exception as e:
-            print(f"❌ Erro ao enviar mensagem: {e}")
+            response = requests.post(url, headers=headers, json=data, timeout=20)
+            if response.status_code != 200:
+                print(f"[WhatsApp] erro HTTP {response.status_code}: {response.text}")
+                return False
+            return True
+        except requests.RequestException as error:
+            print(f"[WhatsApp] erro de rede: {error}")
             return False
 
     def parse_message(self, message_text):
-        """
-        Interpreta a mensagem do usuário
-
-        Formato esperado:
-        "Receita PJ: 1000 Venda de Serviço" ou
-        "Despesa PF: 150 Alimentação"
-
-        Retorna: (tipo_pj_pf, tipo_movimento, categoria, valor, descricao, erro)
-        """
         try:
             message_text = message_text.strip()
+            if ":" not in message_text:
+                return None, None, None, None, None, "❌ Formato inválido. Use: 'Despesa PF: 150 Alimentação'"
 
-            # Dividir por ':'
-            if ':' not in message_text:
-                return None, None, None, None, None, "❌ Formato inválido. Use: 'Receita PJ: 1000 Descrição'"
-
-            parte1, resto = message_text.split(':', 1)
-            parte1 = parte1.strip()
+            parte1, resto = message_text.split(":", 1)
+            header = parte1.strip().upper()
             resto = resto.strip()
 
-            # Identificar tipo de movimento (RECEITA, DESPESA, INVESTIMENTO)
-            tipo_movimento = None
-            for tipo in ["RECEITA", "DESPESA", "INVESTIMENTO"]:
-                if tipo in parte1.upper():
-                    tipo_movimento = tipo
-                    break
-
+            tipo_movimento = next((tipo for tipo in ["RECEITA", "DESPESA", "INVESTIMENTO"] if tipo in header), None)
             if not tipo_movimento:
                 return None, None, None, None, None, "❌ Use 'Receita', 'Despesa' ou 'Investimento'"
 
-            # Identificar PJ ou PF
-            tipo_pj_pf = None
-            if "PJ" in parte1.upper():
-                tipo_pj_pf = "PJ"
-            elif "PF" in parte1.upper():
-                tipo_pj_pf = "PF"
-            else:
+            tipo_pj_pf = "PJ" if "PJ" in header else "PF" if "PF" in header else None
+            if not tipo_pj_pf:
                 return None, None, None, None, None, "❌ Especifique PJ ou PF"
 
-            # Extrair valor e categoria/descrição
-            partes = resto.split(' ', 1)
+            partes = resto.split(None, 1)
             try:
-                valor = float(partes[0].replace(',', '.'))
-            except:
-                return None, None, None, None, None, "❌ Valor inválido. Use números (ex: 1000 ou 1000.50)"
+                valor = float(partes[0].replace(".", "").replace(",", ".")) if "," in partes[0] else float(partes[0])
+            except (ValueError, IndexError):
+                return None, None, None, None, None, "❌ Valor inválido. Use números, por exemplo: 1000 ou 1000,50"
+            if valor <= 0:
+                return None, None, None, None, None, "❌ O valor deve ser maior que zero"
 
-            categoria_descricao = partes[1] if len(partes) > 1 else "Sem descrição"
-
-            # Validar categoria
-            if tipo_movimento == "INVESTIMENTO":
-                categorias_validas = CATEGORIES["GERAL"]["INVESTIMENTO"]
-            else:
-                categorias_validas = CATEGORIES[tipo_pj_pf][tipo_movimento]
-
-            categoria_encontrada = None
-            for cat in categorias_validas:
-                if cat.lower() in categoria_descricao.lower():
-                    categoria_encontrada = cat
-                    break
-
-            if not categoria_encontrada:
-                categoria_encontrada = "Outro"
-
-            return tipo_pj_pf, tipo_movimento, categoria_encontrada, valor, categoria_descricao, None
-
-        except Exception as e:
-            return None, None, None, None, None, f"❌ Erro ao processar: {str(e)}"
+            descricao = partes[1] if len(partes) > 1 else "Sem descrição"
+            categorias_validas = CATEGORIES["GERAL"]["INVESTIMENTO"] if tipo_movimento == "INVESTIMENTO" else CATEGORIES[tipo_pj_pf][tipo_movimento]
+            categoria = next((cat for cat in categorias_validas if cat.lower() in descricao.lower()), "Outro")
+            return tipo_pj_pf, tipo_movimento, categoria, valor, descricao, None
+        except Exception as error:
+            return None, None, None, None, None, f"❌ Erro ao processar: {error}"
 
     def get_help_message(self):
-        """Retorna mensagem de ajuda"""
-        return """
-📱 *Assistente Financeiro*
+        return """📱 *Maria Financeira*
 
 *Como usar:*
 "Receita PJ: 2000 Venda de Serviço"
 "Despesa PF: 150 Alimentação"
-"Investimento: 500 Ações"
+"Investimento PF: 500 Ações"
 
 *Comandos:*
-• "Resumo" - Mostra resumo do mês
-• "Categorias" - Lista categorias
-• "Ajuda" - Esta mensagem
-
-*Exemplos:*
-• "Receita PJ: 5000 Freelancer"
-• "Despesa PJ: 200 Software"
-• "Despesa PF: 50 Uber"
-• "Investimento: 1000 Poupança"
-"""
+• "Resumo PJ" ou "Resumo PF"
+• "Categorias"
+• "Ajuda"""
