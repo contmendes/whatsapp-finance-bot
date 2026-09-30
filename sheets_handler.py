@@ -127,9 +127,16 @@ class SheetsHandler:
         if tipo not in ("PF", "PJ", "GERAL") or movimento not in ("RECEITA", "DESPESA", "INVESTIMENTO") or not nome:
             return False, "❌ Use: categoria adicionar PF despesa Mercado"
         try:
-            values = self.service.spreadsheets().values().get(
-                spreadsheetId=self.spreadsheet_id, range="'Categorias'!A:C"
-            ).execute().get("values", [])
+            try:
+                values = self.service.spreadsheets().values().get(
+                    spreadsheetId=self.spreadsheet_id, range="'Categorias'!A:C"
+                ).execute().get("values", [])
+            except Exception:
+                self.service.spreadsheets().batchUpdate(
+                    spreadsheetId=self.spreadsheet_id,
+                    body={"requests": [{"addSheet": {"properties": {"title": "Categorias"}}}]},
+                ).execute()
+                values = []
             if not values:
                 self.service.spreadsheets().values().update(
                     spreadsheetId=self.spreadsheet_id, range="'Categorias'!A1:C1",
