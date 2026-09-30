@@ -1,7 +1,7 @@
 import os
 from google.auth.transport.requests import Request
 from google.oauth2.service_account import Credentials
-from google.api_python_client import discovery
+from googleapiclient import discovery
 from datetime import datetime
 
 # ID da planilha - você deve colocar o seu aqui
