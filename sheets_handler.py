@@ -166,3 +166,92 @@ class SheetsHandler:
         except Exception as error:
             print(f"[Google Sheets] erro ao editar categoria: {error}")
             return False, "❌ Não consegui editar a aba Categorias."
+
+    def get_profile(self, phone_number, contact_name=""):
+        """Obtém preferências do usuário pela aba Perfis, criando a aba quando necessário."""
+        defaults = {"phone": phone_number, "name": contact_name or "Usuário", "default_type": "PF", "context": "PF", "company": ""}
+        if not self.service or not self.spreadsheet_id:
+            return defaults
+        try:
+            try:
+                values = self.service.spreadsheets().values().get(
+                    spreadsheetId=self.spreadsheet_id, range="'Perfis'!A:E"
+                ).execute().get("values", [])
+            except Exception:
+                self.service.spreadsheets().batchUpdate(spreadsheetId=self.spreadsheet_id, body={"requests": [{"addSheet": {"properties": {"title": "Perfis"}}}]}).execute()
+                values = []
+            for row in values[1:]:
+                if row and row[0] == phone_number:
+                    return {"phone": row[0], "name": row[1] if len(row) > 1 and row[1] else contact_name or "Usuário", "default_type": row[2] if len(row) > 2 and row[2] in ("PF", "PJ") else "PF", "context": row[3] if len(row) > 3 and row[3] in ("PF", "PJ") else "PF", "company": row[4] if len(row) > 4 else ""}
+            if not values:
+                self.service.spreadsheets().batchUpdate(spreadsheetId=self.spreadsheet_id, body={"requests": [{"addSheet": {"properties": {"title": "Perfis"}}}]}).execute()
+                self.service.spreadsheets().values().update(spreadsheetId=self.spreadsheet_id, range="'Perfis'!A1:E1", valueInputOption="USER_ENTERED", body={"values": [["Telefone", "Nome", "Tipo padrão", "Contexto atual", "Empresa"]]}).execute()
+            self.service.spreadsheets().values().append(spreadsheetId=self.spreadsheet_id, range="'Perfis'!A:E", valueInputOption="USER_ENTERED", insertDataOption="INSERT_ROWS", body={"values": [[phone_number, defaults["name"], "PF", "PF", ""]]}).execute()
+            return defaults
+        except Exception as error:
+            print(f"[Google Sheets] erro ao obter perfil: {error}")
+            return defaults
+
+    def set_profile_context(self, phone_number, context, contact_name=""):
+        profile = self.get_profile(phone_number, contact_name)
+        profile["context"] = context
+        if not self.service or not self.spreadsheet_id:
+            return profile
+        try:
+            values = self.service.spreadsheets().values().get(spreadsheetId=self.spreadsheet_id, range="'Perfis'!A:E").execute().get("values", [])
+            for idx, row in enumerate(values[1:], start=2):
+                if row and row[0] == phone_number:
+                    self.service.spreadsheets().values().update(spreadsheetId=self.spreadsheet_id, range=f"'Perfis'!B{idx}:E{idx}", valueInputOption="USER_ENTERED", body={"values": [[profile["name"], profile["default_type"], context, profile["company"]]]}).execute()
+                    break
+        except Exception as error:
+            print(f"[Google Sheets] erro ao atualizar perfil: {error}")
+        return profile
+
+    def find_transactions(self, tipo=None, keyword=None, phone_number=None, limit=10):
+        if not self.service or not self.spreadsheet_id:
+            return []
+        try:
+            values = self.service.spreadsheets().values().get(spreadsheetId=self.spreadsheet_id, range=f"'{self.get_sheet_by_month()}'!A:K").execute().get("values", [])
+            found = []
+            for idx, row in enumerate(values[1:], start=2):
+                if len(row) < 6 or (tipo and row[1] != tipo) or (phone_number and len(row) > 7 and row[7] != phone_number):
+                    continue
+                haystack = " ".join(str(x) for x in row).casefold()
+                if keyword and keyword.casefold() not in haystack:
+                    continue
+                found.append({"row": idx, "date": row[0], "type": row[1], "movement": row[2], "category": row[3], "description": row[4], "value": row[5]})
+                if len(found) >= limit:
+                    break
+            return found
+        except Exception as error:
+            print(f"[Google Sheets] erro ao consultar transações: {error}")
+            return []
+
+    def delete_transaction(self, row_number):
+        if not self.service or not self.spreadsheet_id:
+            return False
+        try:
+            self.service.spreadsheets().values().clear(spreadsheetId=self.spreadsheet_id, range=f"'{self.get_sheet_by_month()}'!A{row_number}:K{row_number}").execute()
+            return True
+        except Exception as error:
+            print(f"[Google Sheets] erro ao apagar transação: {error}")
+            return False
+
+    def update_transaction(self, row_number, value=None, description=None, category=None):
+        if not self.service or not self.spreadsheet_id:
+            return False
+        try:
+            row = self.service.spreadsheets().values().get(spreadsheetId=self.spreadsheet_id, range=f"'{self.get_sheet_by_month()}'!A{row_number}:K{row_number}").execute().get("values", [[]])[0]
+            while len(row) < 11:
+                row.append("")
+            if value is not None:
+                row[5] = float(value)
+            if category:
+                row[3] = category
+            if description:
+                row[4] = description
+            self.service.spreadsheets().values().update(spreadsheetId=self.spreadsheet_id, range=f"'{self.get_sheet_by_month()}'!A{row_number}:K{row_number}", valueInputOption="USER_ENTERED", body={"values": [row]}).execute()
+            return True
+        except Exception as error:
+            print(f"[Google Sheets] erro ao atualizar transação: {error}")
+            return False

@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import os
+import re
 
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
@@ -20,6 +21,7 @@ whatsapp = WhatsAppHandler(
 sheets = SheetsHandler()
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "")
 APP_SECRET = os.getenv("APP_SECRET", "")
+pending_deletions = {}
 
 
 def is_valid_signature() -> bool:
@@ -83,6 +85,22 @@ def handle_message():
 def process_user_message(phone_number, message_text, contact_name="", message_id=""):
     message_upper = message_text.upper().strip()
     response = None
+    profile = sheets.get_profile(phone_number, contact_name)
+
+    if message_upper in ("SIM", "CONFIRMAR", "CONFIRMO") and phone_number in pending_deletions:
+        transaction = pending_deletions.pop(phone_number)
+        response = "✅ Lançamento apagado." if sheets.delete_transaction(transaction["row"]) else "❌ Não consegui apagar o lançamento."
+    elif message_upper in ("NÃO", "NAO", "CANCELAR") and phone_number in pending_deletions:
+        pending_deletions.pop(phone_number, None)
+        response = "Tudo bem, não apaguei nada."
+    elif message_upper in ("MEU PERFIL", "PERFIL", "CONFIGURAÇÕES", "CONFIGURACOES"):
+        response = f"👤 *Seu perfil*\nNome: {profile['name']}\nContexto atual: {profile['context']}\nTipo padrão: {profile['default_type']}\n\nEnvie *usar PF* ou *usar PJ* para trocar."
+    elif message_upper in ("USAR PF", "PF"):
+        sheets.set_profile_context(phone_number, "PF", contact_name)
+        response = "✅ Contexto alterado para *PF*. Agora mensagens sem indicação usarão PF."
+    elif message_upper in ("USAR PJ", "PJ"):
+        sheets.set_profile_context(phone_number, "PJ", contact_name)
+        response = "✅ Contexto alterado para *PJ*. Agora mensagens sem indicação usarão PJ."
 
     if message_upper == "AJUDA":
         response = whatsapp.get_help_message()
@@ -99,15 +117,39 @@ def process_user_message(phone_number, message_text, contact_name="", message_id
                 tipo = "GERAL"
             _, response = sheets.update_category(parts[1].lower(), tipo, movimento, parts[4])
     elif message_upper.startswith("RESUMO"):
-        tipo = "PJ" if "PJ" in message_upper else "PF" if "PF" in message_upper else None
-        if not tipo:
-            response = "Use: 'Resumo PJ' ou 'Resumo PF'"
+        tipo = "PJ" if "PJ" in message_upper else "PF" if "PF" in message_upper else profile["context"]
+        summary = sheets.get_summary(tipo)
+        response = sheets.format_summary(summary, tipo) if summary else "Ainda não há lançamentos para esse contexto."
+    elif message_upper in ("SALDO", "MEU SALDO", "QUANTO TENHO"):
+        summary = sheets.get_summary(profile["context"])
+        response = sheets.format_summary(summary, profile["context"]) if summary else "Ainda não há lançamentos para esse contexto."
+    elif message_upper.startswith(("BUSCAR ", "PROCURAR ", "PESQUISAR ")) or "ONDE GASTEI" in message_upper:
+        keyword = message_text.split(None, 1)[1] if " " in message_text else None
+        if "ONDE GASTEI" in message_upper:
+            keyword = None
+        rows = sheets.find_transactions(tipo=profile["context"], keyword=keyword, phone_number=phone_number)
+        if not rows:
+            response = "Não encontrei lançamentos para essa busca."
         else:
-            summary = sheets.get_summary(tipo)
-            response = sheets.format_summary(summary, tipo) if summary else "Ainda não há lançamentos para esse contexto."
+            response = "🔎 *Lançamentos encontrados:*\n" + "\n".join(f"• {r['date']} — R$ {r['value']} — {r['category']} — {r['description']}" for r in rows)
+    elif message_upper.startswith(("APAGAR ÚLTIMO", "APAGAR ULTIMO", "CORRIGIR ÚLTIMO", "CORRIGIR ULTIMO")):
+        rows = sheets.find_transactions(tipo=profile["context"], phone_number=phone_number, limit=1)
+        if not rows:
+            response = "Não encontrei um lançamento recente para alterar."
+        elif message_upper.startswith("APAGAR"):
+            pending_deletions[phone_number] = rows[0]
+            response = f"⚠️ Apagar este lançamento?\nR$ {rows[0]['value']} — {rows[0]['description']}\nResponda *SIM* para confirmar ou *NÃO* para cancelar."
+        else:
+            value, remaining = whatsapp._extract_amount(message_text)
+            if value is None:
+                response = "Use: *corrigir último para R$ 75* ou *corrigir último para R$ 75 almoço*."
+            else:
+                description = re.sub(r"\b(corrigir|último|ultimo|para|r\$)\b", " ", remaining, flags=re.I).strip(" -:")
+                ok = sheets.update_transaction(rows[0]["row"], value=value, description=description or None)
+                response = "✅ Último lançamento corrigido." if ok else "❌ Não consegui corrigir o lançamento."
     else:
         tipo_pj_pf, tipo_movimento, categoria, valor, descricao, erro = whatsapp.parse_message(
-            message_text, categories=sheets.get_categories()
+            message_text, categories=sheets.get_categories(), default_type=profile["context"]
         )
         if erro:
             response = erro
