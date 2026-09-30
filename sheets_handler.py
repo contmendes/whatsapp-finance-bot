@@ -4,6 +4,7 @@ from datetime import datetime
 
 from google.oauth2.service_account import Credentials
 from googleapiclient import discovery
+from categories import CATEGORIES
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
@@ -96,3 +97,65 @@ class SheetsHandler:
 
     def format_summary(self, summary, tipo):
         return f"📊 *Resumo {tipo} - {self.get_sheet_by_month()}*\n\n💰 Receita: R$ {summary['receita']:.2f}\n💸 Despesa: R$ {summary['despesa']:.2f}\n💼 Investimento: R$ {summary['investimento']:.2f}\n📈 Saldo: R$ {summary['saldo']:.2f}"
+
+    def get_categories(self):
+        """Lê a aba Categorias; usa o catálogo padrão se ela ainda não existir."""
+        if not self.service or not self.spreadsheet_id:
+            return CATEGORIES
+        try:
+            values = self.service.spreadsheets().values().get(
+                spreadsheetId=self.spreadsheet_id, range="'Categorias'!A:C"
+            ).execute().get("values", [])
+            if len(values) < 2:
+                return CATEGORIES
+            result = {"PF": {"RECEITA": [], "DESPESA": []}, "PJ": {"RECEITA": [], "DESPESA": []}, "GERAL": {"INVESTIMENTO": []}}
+            for row in values[1:]:
+                if len(row) < 3:
+                    continue
+                tipo, movimento, nome = row[0].strip().upper(), row[1].strip().upper(), row[2].strip()
+                if tipo in result and movimento in result[tipo] and nome:
+                    result[tipo][movimento].append(nome)
+            return result if any(result[t].get(m) for t in result for m in result[t]) else CATEGORIES
+        except Exception:
+            return CATEGORIES
+
+    def update_category(self, action, tipo, movimento, nome):
+        """Adiciona/remove categoria na aba Categorias, criando o cabeçalho quando necessário."""
+        if not self.service or not self.spreadsheet_id:
+            return False, "❌ Google Sheets não está configurado."
+        tipo, movimento, nome = tipo.upper(), movimento.upper(), nome.strip()
+        if tipo not in ("PF", "PJ", "GERAL") or movimento not in ("RECEITA", "DESPESA", "INVESTIMENTO") or not nome:
+            return False, "❌ Use: categoria adicionar PF despesa Mercado"
+        try:
+            values = self.service.spreadsheets().values().get(
+                spreadsheetId=self.spreadsheet_id, range="'Categorias'!A:C"
+            ).execute().get("values", [])
+            if not values:
+                self.service.spreadsheets().values().update(
+                    spreadsheetId=self.spreadsheet_id, range="'Categorias'!A1:C1",
+                    valueInputOption="USER_ENTERED", body={"values": [["Tipo", "Movimento", "Categoria"]]},
+                ).execute()
+                values = [["Tipo", "Movimento", "Categoria"]]
+            rows = {(r[0].strip().upper(), r[1].strip().upper(), r[2].strip().casefold()) for r in values[1:] if len(r) >= 3}
+            key = (tipo, movimento, nome.casefold())
+            if action == "adicionar":
+                if key in rows:
+                    return True, f"ℹ️ A categoria *{nome}* já existe em {tipo} {movimento.title()}."
+                self.service.spreadsheets().values().append(
+                    spreadsheetId=self.spreadsheet_id, range="'Categorias'!A:C",
+                    valueInputOption="USER_ENTERED", insertDataOption="INSERT_ROWS",
+                    body={"values": [[tipo, movimento, nome]]},
+                ).execute()
+                return True, f"✅ Categoria *{nome}* adicionada em {tipo} {movimento.title()}."
+            if action == "remover":
+                for idx, row in enumerate(values[1:], start=2):
+                    if len(row) >= 3 and (row[0].strip().upper(), row[1].strip().upper(), row[2].strip().casefold()) == key:
+                        self.service.spreadsheets().values().clear(
+                            spreadsheetId=self.spreadsheet_id, range=f"'Categorias'!A{idx}:C{idx}"
+                        ).execute()
+                        return True, f"✅ Categoria *{nome}* removida de {tipo} {movimento.title()}."
+                return False, f"❌ Não encontrei a categoria *{nome}* em {tipo} {movimento.title()}."
+            return False, "❌ Ação inválida. Use adicionar ou remover."
+        except Exception as error:
+            print(f"[Google Sheets] erro ao editar categoria: {error}")
+            return False, "❌ Não consegui editar a aba Categorias."

@@ -65,9 +65,12 @@ def handle_message():
                     for contact in value.get("contacts", [])
                 }
                 for message in value.get("messages", []):
-                    if message.get("type") != "text":
-                        continue
                     from_number = message.get("from", "")
+                    message_type = message.get("type")
+                    if message_type != "text":
+                        if message_type in ("audio", "image", "document"):
+                            whatsapp.send_message(from_number, "📎 Recebi seu arquivo. A leitura de áudio/comprovante será ativada na próxima versão; por enquanto, envie também uma descrição em texto.")
+                        continue
                     message_text = message.get("text", {}).get("body", "").strip()
                     if message_text:
                         process_user_message(from_number, message_text, contacts.get(from_number, ""), message.get("id", ""))
@@ -83,8 +86,18 @@ def process_user_message(phone_number, message_text, contact_name="", message_id
 
     if message_upper == "AJUDA":
         response = whatsapp.get_help_message()
-    elif message_upper == "CATEGORIAS":
-        response = get_categories_text()
+    elif message_upper in ("CATEGORIAS", "CATEGORIA", "LISTA DE CATEGORIAS"):
+        response = get_categories_text(sheets.get_categories())
+    elif message_upper.startswith("CATEGORIA "):
+        parts = message_text.split(None, 4)
+        if len(parts) < 5 or parts[1].lower() not in ("adicionar", "remover"):
+            response = "Use: *categoria adicionar PF despesa Mercado* ou *categoria remover PF despesa Mercado*"
+        else:
+            tipo = parts[2].upper()
+            movimento = parts[3].upper()
+            if movimento == "INVESTIMENTO":
+                tipo = "GERAL"
+            _, response = sheets.update_category(parts[1].lower(), tipo, movimento, parts[4])
     elif message_upper.startswith("RESUMO"):
         tipo = "PJ" if "PJ" in message_upper else "PF" if "PF" in message_upper else None
         if not tipo:
@@ -93,7 +106,9 @@ def process_user_message(phone_number, message_text, contact_name="", message_id
             summary = sheets.get_summary(tipo)
             response = sheets.format_summary(summary, tipo) if summary else "Ainda não há lançamentos para esse contexto."
     else:
-        tipo_pj_pf, tipo_movimento, categoria, valor, descricao, erro = whatsapp.parse_message(message_text)
+        tipo_pj_pf, tipo_movimento, categoria, valor, descricao, erro = whatsapp.parse_message(
+            message_text, categories=sheets.get_categories()
+        )
         if erro:
             response = erro
         else:

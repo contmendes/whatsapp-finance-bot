@@ -1,4 +1,5 @@
 import os
+import re
 
 import requests
 
@@ -38,48 +39,55 @@ class WhatsAppHandler:
             print(f"[WhatsApp] erro de rede: {error}")
             return False
 
-    def parse_message(self, message_text):
+    @staticmethod
+    def _extract_amount(text):
+        match = re.search(r"(?<!\w)(?:r\$\s*)?\d{1,3}(?:\.\d{3})*(?:,\d{1,2})?|(?:r\$\s*)?\d+(?:[\.,]\d{1,2})?(?!\w)", text, flags=re.I)
+        if not match:
+            return None, text
+        raw = match.group(0).lower().replace("r$", "").replace(" ", "")
         try:
-            message_text = message_text.strip()
-            if ":" not in message_text:
-                return None, None, None, None, None, "❌ Formato inválido. Use: 'Despesa PF: 150 Alimentação'"
+            value = float(raw.replace(".", "").replace(",", ".")) if "," in raw or re.fullmatch(r"\d{1,3}(?:\.\d{3})+", raw) else float(raw)
+        except ValueError:
+            return None, text
+        return value, (text[:match.start()] + " " + text[match.end():]).strip()
 
-            parte1, resto = message_text.split(":", 1)
-            header = parte1.strip().upper()
-            resto = resto.strip()
-
-            tipo_movimento = next((tipo for tipo in ["RECEITA", "DESPESA", "INVESTIMENTO"] if tipo in header), None)
-            if not tipo_movimento:
-                return None, None, None, None, None, "❌ Use 'Receita', 'Despesa' ou 'Investimento'"
-
-            tipo_pj_pf = "PJ" if "PJ" in header else "PF" if "PF" in header else None
-            if not tipo_pj_pf:
-                return None, None, None, None, None, "❌ Especifique PJ ou PF"
-
-            partes = resto.split(None, 1)
-            try:
-                valor = float(partes[0].replace(".", "").replace(",", ".")) if "," in partes[0] else float(partes[0])
-            except (ValueError, IndexError):
-                return None, None, None, None, None, "❌ Valor inválido. Use números, por exemplo: 1000 ou 1000,50"
+    def parse_message(self, message_text, categories=None, default_type="PF"):
+        try:
+            original = message_text.strip()
+            normalized = original.upper()
+            tipo_pj_pf = "PJ" if re.search(r"\bPJ\b|EMPRESA|CNPJ|NEGÓCIO", normalized) else "PF" if re.search(r"\bPF\b|PESSOAL|CASA", normalized) else default_type
+            if re.search(r"\b(RECEITA|RECEBI|ENTROU|GANHEI|SALÁRIO|SALARIO|VENDA)\b", normalized):
+                tipo_movimento = "RECEITA"
+            elif re.search(r"\b(INVESTIMENTO|INVESTI|APLIQUEI)\b", normalized):
+                tipo_movimento = "INVESTIMENTO"
+            else:
+                tipo_movimento = "DESPESA"
+            valor, without_value = self._extract_amount(original)
+            if valor is None:
+                return None, None, None, None, None, "❌ Não encontrei um valor. Exemplo: *gastei 45,90 no almoço*"
             if valor <= 0:
                 return None, None, None, None, None, "❌ O valor deve ser maior que zero"
-
-            descricao = partes[1] if len(partes) > 1 else "Sem descrição"
-            categorias_validas = CATEGORIES["GERAL"]["INVESTIMENTO"] if tipo_movimento == "INVESTIMENTO" else CATEGORIES[tipo_pj_pf][tipo_movimento]
-            categoria = next((cat for cat in categorias_validas if cat.lower() in descricao.lower()), "Outro")
+            descricao = re.sub(r"r\$|\b(pf|pj|pessoal|empresa|receita|despesa|investimento|recebi|entrou|gastei|paguei|comprei|ganhei|investi|de|no|na|em)\b", " ", without_value, flags=re.I)
+            descricao = re.sub(r"\s+", " ", descricao).strip(" -:,.\"") or "Sem descrição"
+            source = (categories or CATEGORIES).get("GERAL", {}).get("INVESTIMENTO", []) if tipo_movimento == "INVESTIMENTO" else (categories or CATEGORIES).get(tipo_pj_pf, {}).get(tipo_movimento, [])
+            categoria = next((cat for cat in source if cat.casefold() in descricao.casefold()), "Outro")
             return tipo_pj_pf, tipo_movimento, categoria, valor, descricao, None
         except Exception as error:
             return None, None, None, None, None, f"❌ Erro ao processar: {error}"
 
     def get_help_message(self):
         return """📱 *Maria Financeira*
+Você pode escrever naturalmente, sem formato fixo:
+• *gastei 45,90 no almoço*
+• *recebi 2.000 de salário PF*
+• *paguei 350 de software na empresa*
+• *investi 500 em ações*
 
-*Como usar:*
-"Receita PJ: 2000 Venda de Serviço"
-"Despesa PF: 150 Alimentação"
-"Investimento PF: 500 Ações"
+Se não indicar PF/PJ, uso PF. Comandos:
+• *Resumo PF* ou *Resumo PJ*
+• *Categorias*
+• *Categoria adicionar PF despesa Mercado*
+• *Categoria remover PF despesa Mercado*
+• *Ajuda*
 
-*Comandos:*
-• "Resumo PJ" ou "Resumo PF"
-• "Categorias"
-• "Ajuda"""
+Áudios e fotos de comprovantes serão processados após a ativação do transcritor/leitor de imagens."""

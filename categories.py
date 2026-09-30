@@ -56,19 +56,15 @@ CATEGORIES = {
     }
 }
 
-def get_categories_text():
-    """Retorna as categorias em formato legível"""
-    text = "📋 *Categorias disponíveis:*\n\n"
-
-    for tipo_pj_pf in ["PJ", "PF"]:
-        text += f"\n*{tipo_pj_pf}:*\n"
-        for tipo_movimento in ["RECEITA", "DESPESA"]:
-            text += f"\n  {tipo_movimento}:\n"
-            for cat in CATEGORIES[tipo_pj_pf][tipo_movimento]:
-                text += f"    • {cat}\n"
-
-    text += f"\n*INVESTIMENTO (qualquer tipo):*\n"
-    for cat in CATEGORIES["GERAL"]["INVESTIMENTO"]:
-        text += f"  • {cat}\n"
-
+def get_categories_text(categories=None):
+    """Retorna categorias legíveis e instruções de edição."""
+    categories = categories or CATEGORIES
+    text = "📋 *Categorias disponíveis:*\n"
+    for tipo in ("PF", "PJ"):
+        text += f"\n*{tipo}*\n"
+        for movimento in ("RECEITA", "DESPESA"):
+            values = categories.get(tipo, {}).get(movimento, [])
+            text += f"\n{movimento.title()}: " + ", ".join(values) + "\n"
+    text += "\n*Investimento*\n" + ", ".join(categories.get("GERAL", {}).get("INVESTIMENTO", []))
+    text += "\n\nEditar: *categoria adicionar PF despesa Mercado* ou *categoria remover PF despesa Mercado*."
     return text
