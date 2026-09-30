@@ -3,10 +3,13 @@ import hmac
 import os
 import re
 
+import requests
+
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 
 from categories import get_categories_text
+from gemini_handler import GeminiHandler
 from sheets_handler import SheetsHandler
 from whatsapp_handler import WhatsAppHandler
 
@@ -19,9 +22,11 @@ whatsapp = WhatsAppHandler(
     access_token=os.getenv("ACCESS_TOKEN"),
 )
 sheets = SheetsHandler()
+gemini = GeminiHandler()
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "")
 APP_SECRET = os.getenv("APP_SECRET", "")
 pending_deletions = {}
+pending_media = {}
 
 
 def is_valid_signature() -> bool:
@@ -35,6 +40,19 @@ def is_valid_signature() -> bool:
         APP_SECRET.encode("utf-8"), request.get_data(cache=True), hashlib.sha256
     ).hexdigest()
     return hmac.compare_digest(signature, expected)
+
+
+def download_whatsapp_media(media_id):
+    """Obtém bytes do arquivo pela Cloud API sem persistir mídia no Render."""
+    headers = {"Authorization": f"Bearer {whatsapp.access_token}"}
+    meta = requests.get(f"https://graph.facebook.com/v23.0/{media_id}", headers=headers, timeout=20)
+    meta.raise_for_status()
+    media_url = meta.json().get("url")
+    if not media_url:
+        raise ValueError("WhatsApp não retornou URL de mídia")
+    file_response = requests.get(media_url, headers=headers, timeout=30)
+    file_response.raise_for_status()
+    return file_response.content, meta.json().get("mime_type", "application/octet-stream")
 
 
 @app.route("/webhook", methods=["GET"])
@@ -71,7 +89,7 @@ def handle_message():
                     message_type = message.get("type")
                     if message_type != "text":
                         if message_type in ("audio", "image", "document"):
-                            whatsapp.send_message(from_number, "📎 Recebi seu arquivo. A leitura de áudio/comprovante será ativada na próxima versão; por enquanto, envie também uma descrição em texto.")
+                            process_media_message(from_number, message, contacts.get(from_number, ""))
                         continue
                     message_text = message.get("text", {}).get("body", "").strip()
                     if message_text:
@@ -82,12 +100,43 @@ def handle_message():
         return jsonify({"error": "processing failed"}), 500
 
 
+def process_media_message(phone_number, message, contact_name=""):
+    if not gemini.configured:
+        whatsapp.send_message(phone_number, "📎 Recebi o arquivo, mas a análise ainda não está configurada. Envie o lançamento por texto por enquanto.")
+        return
+    try:
+        media = message.get(message.get("type"), {})
+        media_bytes, mime_type = download_whatsapp_media(media.get("id"))
+        profile = sheets.get_profile(phone_number, contact_name)
+        result, error = gemini.extract_transaction(media_bytes, mime_type, profile["context"], sheets.get_categories())
+        if error or not result:
+            whatsapp.send_message(phone_number, f"📎 {error or 'Não consegui ler o arquivo.'}")
+            return
+        pending_media[phone_number] = result
+        date_text = result.get("data") or "hoje"
+        establishment = result.get("estabelecimento") or "não identificado"
+        category = result.get("categoria") or "Outro"
+        transcript = result.get("transcricao")
+        extra = f"\nTranscrição: {transcript}" if transcript else ""
+        whatsapp.send_message(phone_number, f"🔎 *Encontrei este lançamento:*\n\nValor: R$ {result['valor']:.2f}\nTipo: {result['tipo']}\nMovimento: {result['movimento']}\nCategoria: {category}\nEstabelecimento: {establishment}\nData: {date_text}{extra}\n\nResponda *CONFIRMAR* para registrar ou *CANCELAR* para descartar.")
+    except Exception as error:
+        print(f"[Media] erro ao processar arquivo: {error}")
+        whatsapp.send_message(phone_number, "📎 Recebi o arquivo, mas não consegui analisá-lo. Envie uma foto mais nítida ou uma mensagem de texto.")
+
+
 def process_user_message(phone_number, message_text, contact_name="", message_id=""):
     message_upper = message_text.upper().strip()
     response = None
     profile = sheets.get_profile(phone_number, contact_name)
 
-    if message_upper in ("SIM", "CONFIRMAR", "CONFIRMO") and phone_number in pending_deletions:
+    if message_upper in ("SIM", "CONFIRMAR", "CONFIRMO") and phone_number in pending_media:
+        result = pending_media.pop(phone_number)
+        sucesso, mensagem = sheets.add_transaction(result["tipo"], result["movimento"], result.get("categoria") or "Outro", result.get("descricao") or result.get("estabelecimento") or "Lançamento via mídia", result["valor"], phone_number=phone_number, contact_name=contact_name, message_id=message_id, raw_message=result.get("transcricao") or "mídia analisada pelo Gemini")
+        response = mensagem if sucesso else mensagem
+    elif message_upper in ("NÃO", "NAO", "CANCELAR") and phone_number in pending_media:
+        pending_media.pop(phone_number, None)
+        response = "Tudo bem, não registrei o arquivo."
+    elif message_upper in ("SIM", "CONFIRMAR", "CONFIRMO") and phone_number in pending_deletions:
         transaction = pending_deletions.pop(phone_number)
         response = "✅ Lançamento apagado." if sheets.delete_transaction(transaction["row"]) else "❌ Não consegui apagar o lançamento."
     elif message_upper in ("NÃO", "NAO", "CANCELAR") and phone_number in pending_deletions:
@@ -147,7 +196,7 @@ def process_user_message(phone_number, message_text, contact_name="", message_id
                 description = re.sub(r"\b(corrigir|último|ultimo|para|r\$)\b", " ", remaining, flags=re.I).strip(" -:")
                 ok = sheets.update_transaction(rows[0]["row"], value=value, description=description or None)
                 response = "✅ Último lançamento corrigido." if ok else "❌ Não consegui corrigir o lançamento."
-    else:
+    elif response is None:
         tipo_pj_pf, tipo_movimento, categoria, valor, descricao, erro = whatsapp.parse_message(
             message_text, categories=sheets.get_categories(), default_type=profile["context"]
         )
