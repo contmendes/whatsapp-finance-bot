@@ -178,7 +178,11 @@ class SheetsHandler:
                     spreadsheetId=self.spreadsheet_id, range="'Perfis'!A:E"
                 ).execute().get("values", [])
             except Exception:
-                self.service.spreadsheets().batchUpdate(spreadsheetId=self.spreadsheet_id, body={"requests": [{"addSheet": {"properties": {"title": "Perfis"}}}]}).execute()
+                try:
+                    self.service.spreadsheets().batchUpdate(spreadsheetId=self.spreadsheet_id, body={"requests": [{"addSheet": {"properties": {"title": "Perfis"}}}]}).execute()
+                except Exception as create_error:
+                    if "already exists" not in str(create_error):
+                        raise
                 values = []
             for row in values[1:]:
                 if row and row[0] == phone_number:
