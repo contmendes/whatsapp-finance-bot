@@ -12,7 +12,8 @@ class SheetsHandler:
     def __init__(self):
         self.service = None
         self.credentials = None
-        self.spreadsheet_id = os.getenv("SPREADSHEET_ID", "")
+        # Compatibilidade com a planilha usada pelas versões anteriores do bot.
+        self.spreadsheet_id = os.getenv("SPREADSHEET_ID", "1DblcpVwhnErzxtlh3ZEQJ7qpjTZMJO0Di_ygFTZFifI")
         self._authenticate()
 
     def _authenticate(self):

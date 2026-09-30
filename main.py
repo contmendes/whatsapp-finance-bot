@@ -118,6 +118,7 @@ def health():
     return jsonify({
         "status": "running",
         "sheets_connected": sheets.service is not None,
+        "spreadsheet_configured": bool(sheets.spreadsheet_id),
         "whatsapp_configured": bool(whatsapp.access_token and whatsapp.phone_number_id),
         "webhook_signature_configured": bool(APP_SECRET),
         "sheet_name": sheets.get_sheet_by_month(),
@@ -130,6 +131,7 @@ def status():
         "status": "running",
         "webhook_path": "/webhook",
         "sheets_connected": sheets.service is not None,
+        "spreadsheet_configured": bool(sheets.spreadsheet_id),
         "whatsapp_configured": bool(whatsapp.access_token and whatsapp.phone_number_id),
         "webhook_signature_configured": bool(APP_SECRET),
         "sheet_name": sheets.get_sheet_by_month(),
