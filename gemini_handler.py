@@ -7,10 +7,7 @@ import requests
 
 
 class GeminiHandler:
-    """Integração REST com Gemini para áudio e comprovantes.
-
-    A chave é lida exclusivamente de GEMINI_API_KEY no ambiente do Render.
-    """
+    """Integração REST com Gemini para texto, áudio, comprovantes e PDFs."""
 
     def __init__(self):
         self.api_key = os.getenv("GEMINI_API_KEY", "").strip()
@@ -28,7 +25,7 @@ class GeminiHandler:
             return None, "O arquivo é grande demais para a análise gratuita. Envie um áudio ou foto menor."
         category_text = json.dumps(categories or {}, ensure_ascii=False)
         prompt = f"""Você é a Maria Financeira, assistente financeira brasileira.
-Analise o áudio ou comprovante e extraia UM lançamento financeiro. O contexto padrão é {context_type}.
+Analise o áudio, imagem ou PDF e extraia UM lançamento financeiro. O contexto padrão é {context_type}.
 Não invente dados. Se um campo não estiver claro, use null e reduza confidence.
 Mantenha a separação PF/PJ: tipo deve ser PF ou PJ.
 Categorias disponíveis: {category_text}
@@ -76,5 +73,62 @@ Responda SOMENTE JSON válido com exatamente este formato:
             result["confidence"] = float(result.get("confidence") or 0)
             return result, None
         except (KeyError, ValueError, TypeError, requests.RequestException) as error:
-            print(f"[Gemini] erro ao interpretar resposta: {error}")
+            print(f"[Gemini] erro ao interpretar arquivo: {error}")
             return None, "Não consegui interpretar o arquivo. Envie uma mensagem de texto para confirmar."
+
+    def interpret_text(self, message, context_type="PF", categories=None):
+        """Interpreta texto livre em uma intenção segura para o fluxo da Maria."""
+        if not self.configured:
+            return None, "Gemini não configurado"
+        category_text = json.dumps(categories or {}, ensure_ascii=False)
+        prompt = f"""Você é a Maria Financeira, assistente financeira brasileira no WhatsApp.
+Interprete a mensagem do usuário em linguagem natural. O contexto PF/PJ atual é {context_type}.
+Não execute ações; apenas classifique a intenção e extraia os dados.
+A separação PF/PJ é obrigatória. Se o usuário não mencionar, use {context_type}.
+Categorias disponíveis: {category_text}
+Mensagem: {message}
+Responda SOMENTE JSON com este formato:
+{{"intent":"launch|summary|balance|search|profile|categories|switch_context|help|delete_last|edit_last|unknown","tipo":"PF ou PJ","movimento":"DESPESA|RECEITA|INVESTIMENTO","valor":number,"categoria":"string","descricao":"string","keyword":"string","mes":"YYYY-MM ou todos","contexto":"PF ou PJ","confidence":number,"reply":"string"}}
+"""
+        body = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "temperature": 0.1,
+                "responseMimeType": "application/json",
+                "responseSchema": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "intent": {"type": "STRING", "enum": ["launch", "summary", "balance", "search", "profile", "categories", "switch_context", "help", "delete_last", "edit_last", "unknown"]},
+                        "tipo": {"type": "STRING", "enum": ["PF", "PJ"]},
+                        "movimento": {"type": "STRING", "enum": ["DESPESA", "RECEITA", "INVESTIMENTO"]},
+                        "valor": {"type": "NUMBER", "nullable": True},
+                        "categoria": {"type": "STRING"},
+                        "descricao": {"type": "STRING"},
+                        "keyword": {"type": "STRING"},
+                        "mes": {"type": "STRING"},
+                        "contexto": {"type": "STRING", "enum": ["PF", "PJ"]},
+                        "confidence": {"type": "NUMBER"},
+                        "reply": {"type": "STRING"},
+                    },
+                    "required": ["intent", "tipo", "movimento", "valor", "categoria", "descricao", "keyword", "mes", "contexto", "confidence", "reply"],
+                },
+            },
+        }
+        try:
+            response = requests.post(self.endpoint, params={"key": self.api_key}, json=body, timeout=30)
+            if response.status_code != 200:
+                print(f"[Gemini] erro HTTP na interpretação: {response.status_code}: {response.text[:300]}")
+                return None, "Falha temporária"
+            data = response.json()
+            text = data["candidates"][0]["content"]["parts"][0]["text"]
+            text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip(), flags=re.I)
+            result = json.loads(text)
+            result["confidence"] = float(result.get("confidence") or 0)
+            if result.get("tipo") not in ("PF", "PJ"):
+                result["tipo"] = context_type
+            if result.get("contexto") not in ("PF", "PJ"):
+                result["contexto"] = context_type
+            return result, None
+        except (KeyError, ValueError, TypeError, requests.RequestException) as error:
+            print(f"[Gemini] erro ao interpretar texto: {error}")
+            return None, "Falha temporária"

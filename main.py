@@ -28,6 +28,7 @@ APP_SECRET = os.getenv("APP_SECRET", "")
 DASHBOARD_TOKEN = os.getenv("DASHBOARD_TOKEN", "").strip()
 pending_deletions = {}
 pending_media = {}
+pending_ai = {}
 
 
 def is_valid_signature() -> bool:
@@ -139,9 +140,16 @@ def process_user_message(phone_number, message_text, contact_name="", message_id
         result = pending_media.pop(phone_number)
         sucesso, mensagem = sheets.add_transaction(result["tipo"], result["movimento"], result.get("categoria") or "Outro", result.get("descricao") or result.get("estabelecimento") or "Lançamento via mídia", result["valor"], phone_number=phone_number, contact_name=contact_name, message_id=message_id, raw_message=result.get("transcricao") or "mídia analisada pelo Gemini")
         response = mensagem if sucesso else mensagem
+    elif message_upper in ("SIM", "CONFIRMAR", "CONFIRMO") and phone_number in pending_ai:
+        result = pending_ai.pop(phone_number)
+        sucesso, mensagem = sheets.add_transaction(result["tipo"], result["movimento"], result.get("categoria") or "Outro", result.get("descricao") or "Lançamento via texto", result["valor"], phone_number=phone_number, contact_name=contact_name, message_id=message_id, raw_message=result.get("raw_message") or "texto interpretado pelo Gemini")
+        response = mensagem if sucesso else mensagem
     elif message_upper in ("NÃO", "NAO", "CANCELAR") and phone_number in pending_media:
         pending_media.pop(phone_number, None)
         response = "Tudo bem, não registrei o arquivo."
+    elif message_upper in ("NÃO", "NAO", "CANCELAR") and phone_number in pending_ai:
+        pending_ai.pop(phone_number, None)
+        response = "Tudo bem, não registrei esse lançamento."
     elif message_upper in ("SIM", "CONFIRMAR", "CONFIRMO") and phone_number in pending_deletions:
         transaction = pending_deletions.pop(phone_number)
         response = "✅ Lançamento apagado." if sheets.delete_transaction(transaction["row"]) else "❌ Não consegui apagar o lançamento."
@@ -203,22 +211,36 @@ def process_user_message(phone_number, message_text, contact_name="", message_id
                 ok = sheets.update_transaction(rows[0]["row"], value=value, description=description or None)
                 response = "✅ Último lançamento corrigido." if ok else "❌ Não consegui corrigir o lançamento."
     elif response is None:
-        tipo_pj_pf, tipo_movimento, categoria, valor, descricao, erro = whatsapp.parse_message(
-            message_text, categories=sheets.get_categories(), default_type=profile["context"]
-        )
-        if erro:
-            response = erro
+        categories = sheets.get_categories()
+        interpreted, _ = gemini.interpret_text(message_text, profile["context"], categories) if gemini.configured else (None, "not configured")
+        intent = interpreted.get("intent") if interpreted and interpreted.get("confidence", 0) >= 0.55 else None
+        if intent == "launch" and (interpreted.get("valor") or 0) > 0:
+            interpreted["raw_message"] = message_text
+            pending_ai[phone_number] = interpreted
+            response = f"🔎 Entendi assim:\n\n{interpreted.get('tipo', profile['context'])} · {interpreted.get('movimento', 'DESPESA')}\nR$ {float(interpreted['valor']):.2f} · {interpreted.get('categoria') or 'Outro'}\n{interpreted.get('descricao') or 'Sem descrição'}\n\nResponda *CONFIRMAR* para registrar ou *CANCELAR* para descartar."
+        elif intent in ("summary", "balance"):
+            tipo = interpreted.get("tipo") if interpreted.get("tipo") in ("PF", "PJ") else profile["context"]
+            summary = sheets.get_summary(tipo)
+            response = sheets.format_summary(summary, tipo) if summary else "Ainda não há lançamentos para esse contexto."
+        elif intent == "profile":
+            response = f"👤 *Seu perfil*\nNome: {profile['name']}\nContexto atual: {profile['context']}\nTipo padrão: {profile['default_type']}\n\nVocê pode dizer, por exemplo: *quero usar PJ*."
+        elif intent == "categories":
+            response = get_categories_text(categories)
+        elif intent == "switch_context":
+            context = interpreted.get("contexto") if interpreted.get("contexto") in ("PF", "PJ") else profile["context"]
+            sheets.set_profile_context(phone_number, context, contact_name)
+            response = f"✅ Contexto alterado para *{context}*. Os próximos lançamentos sem indicação usarão esse contexto."
+        elif intent == "help":
+            response = whatsapp.get_help_message()
+        elif intent == "search":
+            rows = sheets.find_transactions(tipo=profile["context"], keyword=interpreted.get("keyword") or None, phone_number=phone_number)
+            response = "Não encontrei lançamentos para essa busca." if not rows else "🔎 *Encontrei:*\n" + "\n".join(f"• {r['date']} — R$ {r['value']} — {r['category']} — {r['description']}" for r in rows)
         else:
-            sucesso, mensagem = sheets.add_transaction(
-                tipo_pj_pf, tipo_movimento, categoria, descricao, valor,
-                phone_number=phone_number,
-                contact_name=contact_name,
-                message_id=message_id,
-                raw_message=message_text,
-            )
-            if sucesso:
-                response = mensagem
+            tipo_pj_pf, tipo_movimento, categoria, valor, descricao, erro = whatsapp.parse_message(message_text, categories=categories, default_type=profile["context"])
+            if erro:
+                response = erro + "\n\nVocê pode escrever de forma livre, como: *gastei 45 no almoço*."
             else:
+                sucesso, mensagem = sheets.add_transaction(tipo_pj_pf, tipo_movimento, categoria, descricao, valor, phone_number=phone_number, contact_name=contact_name, message_id=message_id, raw_message=message_text)
                 response = mensagem
 
     if response:

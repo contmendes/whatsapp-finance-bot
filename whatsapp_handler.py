@@ -77,7 +77,7 @@ class WhatsAppHandler:
 
     def get_help_message(self):
         return """📱 *Maria Financeira*
-Você pode escrever naturalmente, sem formato fixo:
+	Você pode falar comigo de forma natural, sem formato fixo:
 • *gastei 45,90 no almoço*
 • *recebi 2.000 de salário PF*
 • *paguei 350 de software na empresa*
@@ -90,4 +90,10 @@ Se não indicar PF/PJ, uso PF. Comandos:
 • *Categoria remover PF despesa Mercado*
 • *Ajuda*
 
-Áudios e fotos de comprovantes serão processados após a ativação do transcritor/leitor de imagens."""
+	Também posso responder perguntas como:
+	• *quanto gastei com alimentação este mês?*
+	• *onde gastei mais?*
+	• *mostre meu resumo PJ*
+	• *troque meu contexto para PF*
+
+	Áudios, fotos e PDFs de comprovantes são analisados pelo Gemini e sempre pedem sua confirmação antes de registrar."""
