@@ -1,6 +1,7 @@
 import json
 import os
 from datetime import datetime
+from time import monotonic
 
 from google.oauth2.service_account import Credentials
 from googleapiclient import discovery
@@ -15,6 +16,7 @@ class SheetsHandler:
         self.credentials = None
         # Compatibilidade com a planilha usada pelas versões anteriores do bot.
         self.spreadsheet_id = os.getenv("SPREADSHEET_ID", "1DblcpVwhnErzxtlh3ZEQJ7qpjTZMJO0Di_ygFTZFifI")
+        self._dashboard_cache = {}
         self._authenticate()
 
     def _authenticate(self):
@@ -64,6 +66,7 @@ class SheetsHandler:
                 insertDataOption="INSERT_ROWS",
                 body={"values": [row]},
             ).execute()
+            self._dashboard_cache.clear()
             return True, f"✅ Transação registrada na aba '{self.get_sheet_by_month()}'."
         except Exception as error:
             print(f"[Google Sheets] erro ao adicionar transação: {error}")
@@ -120,6 +123,10 @@ class SheetsHandler:
 
     def get_dashboard_data(self, month="", tipo="TODOS"):
         """Consolida as abas mensais; não inclui Categorias nem Perfis."""
+        cache_key = (month or "todos", tipo or "TODOS")
+        cached = self._dashboard_cache.get(cache_key)
+        if cached and monotonic() - cached[0] < 30:
+            return cached[1]
         empty = {"months": [], "selected_month": month or "todos", "tipo": tipo, "metrics": {"receita": 0, "despesa": 0, "investimento": 0, "saldo": 0, "count": 0}, "by_category": [], "by_type": [], "recent": []}
         if not self.service or not self.spreadsheet_id:
             return empty
@@ -129,8 +136,11 @@ class SheetsHandler:
             excluded = {"categorias", "perfis"}
             month_titles = [title for title in titles if title and title.casefold() not in excluded]
             rows = []
-            for title in month_titles:
-                values = self.service.spreadsheets().values().get(spreadsheetId=self.spreadsheet_id, range=f"'{title}'!A:K").execute().get("values", [])
+            read_titles = [title for title in month_titles if not month or month == "todos" or title.casefold() == month.casefold()]
+            ranges = [f"'{title}'!A:F" for title in read_titles]
+            batch = self.service.spreadsheets().values().batchGet(spreadsheetId=self.spreadsheet_id, ranges=ranges, majorDimension="ROWS").execute().get("valueRanges", [])
+            for title, value_range in zip(read_titles, batch):
+                values = value_range.get("values", [])
                 for row in values[1:]:
                     if len(row) < 6:
                         continue
@@ -160,7 +170,9 @@ class SheetsHandler:
                 categories[item["category"]] = categories.get(item["category"], 0.0) + item["value"]
                 types[item["type"]] += item["value"]
             rows.sort(key=lambda item: item["parsed_date"] or datetime.min, reverse=True)
-            return {"months": month_titles, "selected_month": month or "todos", "tipo": tipo, "metrics": metrics, "by_category": [{"name": name, "value": value} for name, value in sorted(categories.items(), key=lambda pair: pair[1], reverse=True)[:10]], "by_type": [{"name": name, "value": value} for name, value in types.items()], "recent": [{key: item[key] for key in ("date", "type", "movement", "category", "description", "value", "sheet")} for item in rows[:12]]}
+            result = {"months": month_titles, "selected_month": month or "todos", "tipo": tipo, "metrics": metrics, "by_category": [{"name": name, "value": value} for name, value in sorted(categories.items(), key=lambda pair: pair[1], reverse=True)[:10]], "by_type": [{"name": name, "value": value} for name, value in types.items()], "recent": [{key: item[key] for key in ("date", "type", "movement", "category", "description", "value", "sheet")} for item in rows[:12]]}
+            self._dashboard_cache[cache_key] = (monotonic(), result)
+            return result
         except Exception as error:
             print(f"[Google Sheets] erro no dashboard: {error}")
             return empty
