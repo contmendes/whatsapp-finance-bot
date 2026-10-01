@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Maria Financeira · Dashboard</title>
+  <style>
+    :root{--ink:#17251f;--muted:#6b7c73;--paper:#f7faf8;--card:#fff;--line:#e1ebe5;--green:#0f8a5f;--mint:#dff5e9;--red:#cf5d5d;--blue:#5579c7;--shadow:0 16px 45px rgba(25,67,48,.08)}
+    *{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font:14px/1.5 Inter,system-ui,-apple-system,Segoe UI,sans-serif}.wrap{max-width:1280px;margin:auto;padding:32px 22px 60px}.top{display:flex;justify-content:space-between;gap:20px;align-items:flex-end;margin-bottom:25px}.eyebrow{color:var(--green);font-weight:800;letter-spacing:.12em;text-transform:uppercase;font-size:11px}.brand{font-size:32px;line-height:1.1;margin:5px 0;font-weight:850;letter-spacing:-.04em}.sub{color:var(--muted);margin:0}.filters{display:flex;flex-wrap:wrap;gap:10px;align-items:center}.filters select{background:#fff;border:1px solid var(--line);border-radius:10px;padding:10px 12px;color:var(--ink);font-weight:700}.updated{font-size:12px;color:var(--muted);margin-top:8px}.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}.card{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:20px;box-shadow:var(--shadow)}.metric-label{color:var(--muted);font-weight:700}.metric{font-size:27px;font-weight:850;margin-top:8px;letter-spacing:-.04em}.metric.green{color:var(--green)}.metric.red{color:var(--red)}.metric.blue{color:var(--blue)}.section{margin-top:18px}.section-title{font-size:17px;margin:0 0 12px;font-weight:850}.two{display:grid;grid-template-columns:1.1fr .9fr;gap:18px}.bar-row{display:grid;grid-template-columns:150px 1fr 92px;gap:10px;align-items:center;margin:13px 0}.bar-name{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--muted)}.bar-track{height:10px;background:#edf2ef;border-radius:99px;overflow:hidden}.bar-fill{height:100%;background:var(--green);border-radius:99px}.bar-value{text-align:right;font-weight:750}.type-row{display:flex;gap:10px;margin-top:16px}.type{flex:1;padding:15px;border-radius:14px;background:var(--mint)}.type.pj{background:#e8edfb}.type strong{display:block;font-size:20px;margin-top:4px}.table-wrap{overflow:auto}.table{width:100%;border-collapse:collapse;min-width:720px}.table th,.table td{text-align:left;padding:12px 10px;border-bottom:1px solid var(--line);white-space:nowrap}.table th{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}.pill{border-radius:99px;padding:4px 8px;font-size:11px;font-weight:800;background:#edf2ef}.pill.pf{background:var(--mint);color:var(--green)}.pill.pj{background:#e8edfb;color:#4664ad}.empty{color:var(--muted);padding:25px 0;text-align:center}.error{background:#fff0f0;border:1px solid #f2caca;color:#a33b3b;padding:12px;border-radius:12px;margin-bottom:15px;display:none}@media(max-width:850px){.top{align-items:flex-start;flex-direction:column}.grid{grid-template-columns:repeat(2,1fr)}.two{grid-template-columns:1fr}}@media(max-width:500px){.wrap{padding:22px 14px}.brand{font-size:27px}.grid{grid-template-columns:1fr}.bar-row{grid-template-columns:105px 1fr 76px;font-size:12px}}
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <header class="top"><div><div class="eyebrow">Maria Financeira</div><h1 class="brand">Visão geral financeira</h1><p class="sub">Consolidado diretamente das abas mensais da sua planilha.</p><div class="updated" id="updated">Carregando...</div></div><div class="filters"><select id="month"><option value="todos">Todos os meses</option></select><select id="type"><option value="TODOS">PF + PJ</option><option value="PF">Somente PF</option><option value="PJ">Somente PJ</option></select></div></header>
+    <div class="error" id="error"></div>
+    <section class="grid"><article class="card"><div class="metric-label">Receitas</div><div class="metric green" id="receita">R$ 0,00</div></article><article class="card"><div class="metric-label">Despesas</div><div class="metric red" id="despesa">R$ 0,00</div></article><article class="card"><div class="metric-label">Investimentos</div><div class="metric blue" id="investimento">R$ 0,00</div></article><article class="card"><div class="metric-label">Saldo</div><div class="metric" id="saldo">R$ 0,00</div><div class="metric-label" id="count" style="margin-top:5px;font-size:12px">0 lançamentos</div></article></section>
+    <section class="section two"><article class="card"><h2 class="section-title">Despesas e receitas por categoria</h2><div id="categories"></div></article><article class="card"><h2 class="section-title">Separação PF x PJ</h2><div class="type-row"><div class="type"><span>PF</span><strong id="pf">R$ 0,00</strong></div><div class="type pj"><span>PJ</span><strong id="pj">R$ 0,00</strong></div></div><p class="sub" style="margin-top:18px">Valores por tipo, mantendo a separação da Maria Financeira.</p></article></section>
+    <section class="section card"><h2 class="section-title">Lançamentos recentes</h2><div class="table-wrap"><table class="table"><thead><tr><th>Data</th><th>Tipo</th><th>Movimento</th><th>Categoria</th><th>Descrição</th><th>Valor</th><th>Aba</th></tr></thead><tbody id="recent"></tbody></table></div></section>
+  </main>
+<script>
+const token = new URLSearchParams(location.search).get('token') || '';
+const money = n => new Intl.NumberFormat('pt-BR',{style:'currency',currency:'BRL'}).format(Number(n||0));
+const esc = s => String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+async function load(){
+  const month=document.getElementById('month').value||'todos', type=document.getElementById('type').value;
+  const res=await fetch(`/api/dashboard?month=${encodeURIComponent(month)}&tipo=${type}&token=${encodeURIComponent(token)}`);
+  const data=await res.json(); if(!res.ok){throw new Error(data.error||'Não foi possível ler o dashboard.');}
+  document.getElementById('error').style.display='none';
+  for(const m of ['receita','despesa','investimento','saldo'])document.getElementById(m).textContent=money(data.metrics[m]);
+  document.getElementById('count').textContent=`${data.metrics.count} lançamento${data.metrics.count===1?'':'s'}`;
+  const max=Math.max(...data.by_category.map(x=>x.value),1);
+  document.getElementById('categories').innerHTML=data.by_category.length?data.by_category.map(x=>`<div class="bar-row"><div class="bar-name" title="${esc(x.name)}">${esc(x.name)}</div><div class="bar-track"><div class="bar-fill" style="width:${Math.max(3,x.value/max*100)}%"></div></div><div class="bar-value">${money(x.value)}</div></div>`).join(''):'<div class="empty">Nenhum dado para este filtro.</div>';
+  document.getElementById('pf').textContent=money((data.by_type.find(x=>x.name==='PF')||{}).value);document.getElementById('pj').textContent=money((data.by_type.find(x=>x.name==='PJ')||{}).value);
+  document.getElementById('recent').innerHTML=data.recent.length?data.recent.map(x=>`<tr><td>${esc(x.date)}</td><td><span class="pill ${x.type.toLowerCase()}">${esc(x.type)}</span></td><td>${esc(x.movement)}</td><td>${esc(x.category)}</td><td>${esc(x.description)}</td><td>${money(x.value)}</td><td>${esc(x.sheet)}</td></tr>`).join(''):'<tr><td colspan="7" class="empty">Nenhum lançamento para este período.</td></tr>';
+  document.getElementById('updated').textContent='Atualizado em '+new Date().toLocaleTimeString('pt-BR');
+  if(data.months.length && document.getElementById('month').options.length===1){data.months.forEach(x=>document.getElementById('month').add(new Option(x,x)));}
+}
+document.getElementById('month').addEventListener('change',load);document.getElementById('type').addEventListener('change',load);load().catch(e=>{const el=document.getElementById('error');el.textContent=e.message;el.style.display='block';});setInterval(()=>load().catch(()=>{}),60000);
+</script>
+</body></html>

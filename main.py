@@ -6,7 +6,7 @@ import re
 import requests
 
 from dotenv import load_dotenv
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, render_template, request
 
 from categories import get_categories_text
 from gemini_handler import GeminiHandler
@@ -25,6 +25,7 @@ sheets = SheetsHandler()
 gemini = GeminiHandler()
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "")
 APP_SECRET = os.getenv("APP_SECRET", "")
+DASHBOARD_TOKEN = os.getenv("DASHBOARD_TOKEN", "").strip()
 pending_deletions = {}
 pending_media = {}
 
@@ -53,6 +54,11 @@ def download_whatsapp_media(media_id):
     file_response = requests.get(media_url, headers=headers, timeout=30)
     file_response.raise_for_status()
     return file_response.content, meta.json().get("mime_type", "application/octet-stream")
+
+
+def dashboard_authorized():
+    token = request.args.get("token", "")
+    return bool(DASHBOARD_TOKEN and token and hmac.compare_digest(token, DASHBOARD_TOKEN))
 
 
 @app.route("/webhook", methods=["GET"])
@@ -242,6 +248,26 @@ def status():
         "webhook_signature_configured": bool(APP_SECRET),
         "sheet_name": sheets.get_sheet_by_month(),
     })
+
+
+@app.route("/dashboard", methods=["GET"])
+def dashboard():
+    if not DASHBOARD_TOKEN:
+        return "Dashboard ainda não configurado: adicione DASHBOARD_TOKEN no Render.", 503
+    if not dashboard_authorized():
+        return "Acesso negado. Abra o dashboard com o token fornecido pelo administrador.", 401
+    return render_template("dashboard.html")
+
+
+@app.route("/api/dashboard", methods=["GET"])
+def dashboard_api():
+    if not DASHBOARD_TOKEN or not dashboard_authorized():
+        return jsonify({"error": "Acesso não autorizado."}), 401
+    month = request.args.get("month", "todos").strip()
+    tipo = request.args.get("tipo", "TODOS").strip().upper()
+    if tipo not in ("TODOS", "PF", "PJ"):
+        tipo = "TODOS"
+    return jsonify(sheets.get_dashboard_data(month=month, tipo=tipo))
 
 
 if __name__ == "__main__":

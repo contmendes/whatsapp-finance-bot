@@ -98,6 +98,73 @@ class SheetsHandler:
     def format_summary(self, summary, tipo):
         return f"📊 *Resumo {tipo} - {self.get_sheet_by_month()}*\n\n💰 Receita: R$ {summary['receita']:.2f}\n💸 Despesa: R$ {summary['despesa']:.2f}\n💼 Investimento: R$ {summary['investimento']:.2f}\n📈 Saldo: R$ {summary['saldo']:.2f}"
 
+    @staticmethod
+    def _parse_value(value):
+        try:
+            text = str(value).strip().replace("R$", "").replace(" ", "")
+            if "," in text:
+                text = text.replace(".", "").replace(",", ".")
+            return float(text)
+        except (TypeError, ValueError):
+            return 0.0
+
+    @staticmethod
+    def _parse_date(value):
+        text = str(value or "").strip()
+        for fmt in ("%d/%m/%Y %H:%M:%S", "%d/%m/%Y", "%Y-%m-%d", "%Y-%m-%d %H:%M:%S"):
+            try:
+                return datetime.strptime(text, fmt)
+            except ValueError:
+                pass
+        return None
+
+    def get_dashboard_data(self, month="", tipo="TODOS"):
+        """Consolida as abas mensais; não inclui Categorias nem Perfis."""
+        empty = {"months": [], "selected_month": month or "todos", "tipo": tipo, "metrics": {"receita": 0, "despesa": 0, "investimento": 0, "saldo": 0, "count": 0}, "by_category": [], "by_type": [], "recent": []}
+        if not self.service or not self.spreadsheet_id:
+            return empty
+        try:
+            metadata = self.service.spreadsheets().get(spreadsheetId=self.spreadsheet_id, fields="sheets.properties(title)").execute()
+            titles = [s.get("properties", {}).get("title", "") for s in metadata.get("sheets", [])]
+            excluded = {"categorias", "perfis"}
+            month_titles = [title for title in titles if title and title.casefold() not in excluded]
+            rows = []
+            for title in month_titles:
+                values = self.service.spreadsheets().values().get(spreadsheetId=self.spreadsheet_id, range=f"'{title}'!A:K").execute().get("values", [])
+                for row in values[1:]:
+                    if len(row) < 6:
+                        continue
+                    row_date = self._parse_date(row[0])
+                    row_type = str(row[1]).strip().upper()
+                    if row_type not in ("PF", "PJ"):
+                        continue
+                    if tipo in ("PF", "PJ") and row_type != tipo:
+                        continue
+                    if month and month != "todos":
+                        selected_sheet = title.casefold() == month.casefold()
+                        selected_period = bool(row_date and row_date.strftime("%Y-%m") == month)
+                        if not selected_sheet and not selected_period:
+                            continue
+                    rows.append({"date": row[0], "parsed_date": row_date, "type": row_type, "movement": str(row[2]).strip().upper(), "category": row[3] if len(row) > 3 else "Sem categoria", "description": row[4] if len(row) > 4 else "", "value": self._parse_value(row[5]), "sheet": title})
+            metrics = {"receita": 0.0, "despesa": 0.0, "investimento": 0.0, "saldo": 0.0, "count": len(rows)}
+            categories = {}
+            types = {"PF": 0.0, "PJ": 0.0}
+            for item in rows:
+                movement = item["movement"].lower()
+                if movement in metrics:
+                    metrics[movement] += item["value"]
+                if movement == "receita":
+                    metrics["saldo"] += item["value"]
+                elif movement == "despesa":
+                    metrics["saldo"] -= item["value"]
+                categories[item["category"]] = categories.get(item["category"], 0.0) + item["value"]
+                types[item["type"]] += item["value"]
+            rows.sort(key=lambda item: item["parsed_date"] or datetime.min, reverse=True)
+            return {"months": month_titles, "selected_month": month or "todos", "tipo": tipo, "metrics": metrics, "by_category": [{"name": name, "value": value} for name, value in sorted(categories.items(), key=lambda pair: pair[1], reverse=True)[:10]], "by_type": [{"name": name, "value": value} for name, value in types.items()], "recent": [{key: item[key] for key in ("date", "type", "movement", "category", "description", "value", "sheet")} for item in rows[:12]]}
+        except Exception as error:
+            print(f"[Google Sheets] erro no dashboard: {error}")
+            return empty
+
     def get_categories(self):
         """Lê a aba Categorias; usa o catálogo padrão se ela ainda não existir."""
         if not self.service or not self.spreadsheet_id:

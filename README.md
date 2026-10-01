@@ -20,6 +20,7 @@ VERIFY_TOKEN=...
 SPREADSHEET_ID=...
 SHEET_NAME=Lançamentos
 GOOGLE_CREDENTIALS_JSON={...}
+DASHBOARD_TOKEN=crie-um-token-forte
 ```
 
 Nunca publique tokens ou o JSON da conta de serviço no GitHub. O arquivo `.env.example` contém apenas placeholders.
@@ -42,6 +43,19 @@ Data | Tipo | Movimento | Categoria | Descrição | Valor | Saldo | Telefone | N
 - **Start command:** `gunicorn main:app`
 - **Health:** `https://SEU-SERVICO.onrender.com/health`
 - **Status:** `https://SEU-SERVICO.onrender.com/api/whatsapp/status`
+
+## Dashboard
+
+O dashboard lê automaticamente todas as abas mensais da planilha e ignora as abas `Categorias` e `Perfis`.
+Ele consolida receitas, despesas, investimentos, saldo, categorias, PF/PJ e lançamentos recentes.
+
+Configure `DASHBOARD_TOKEN` no Render e acesse:
+
+```text
+https://SEU-SERVICO.onrender.com/dashboard?token=SEU_DASHBOARD_TOKEN
+```
+
+A página atualiza sozinha a cada 60 segundos e também permite trocar o mês e filtrar PF, PJ ou ambos.
 
 ## Webhook da Meta
 
