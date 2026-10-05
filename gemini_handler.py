@@ -59,7 +59,7 @@ Responda SOMENTE JSON válido com exatamente este formato:
             },
         }
         try:
-            response = requests.post(self.endpoint, params={"key": self.api_key}, json=body, timeout=60)
+            response = requests.post(self.endpoint, headers={"x-goog-api-key": self.api_key}, json=body, timeout=60)
             if response.status_code != 200:
                 print(f"[Gemini] erro HTTP {response.status_code}: {response.text[:500]}")
                 return None, "Não consegui analisar o arquivo agora."
@@ -115,7 +115,7 @@ Responda SOMENTE JSON com este formato:
             },
         }
         try:
-            response = requests.post(self.endpoint, params={"key": self.api_key}, json=body, timeout=30)
+            response = requests.post(self.endpoint, headers={"x-goog-api-key": self.api_key}, json=body, timeout=30)
             if response.status_code != 200:
                 print(f"[Gemini] erro HTTP na interpretação: {response.status_code}: {response.text[:300]}")
                 return None, "Falha temporária"
