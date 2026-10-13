@@ -33,10 +33,63 @@ class SheetsHandler:
                 print("[Google Sheets] GOOGLE_CREDENTIALS_JSON não configurado")
                 return False
             self.service = discovery.build("sheets", "v4", credentials=self.credentials, cache_discovery=False)
+            self._migrate_monthly_sheets()
             return True
         except Exception as error:
             print(f"[Google Sheets] erro de autenticação: {error}")
             return False
+
+    def _migrate_monthly_sheets(self):
+        """Converte o layout antigo para o layout de gestão de caixa solicitado."""
+        try:
+            metadata = self.service.spreadsheets().get(spreadsheetId=self.spreadsheet_id, fields="sheets.properties.title").execute()
+            excluded = {"categorias", "perfis"}
+            titles = [s.get("properties", {}).get("title", "") for s in metadata.get("sheets", [])]
+            target_headers = ["Data", "Escopo", "Categoria", "Código", "Tipo", "Descrição", "Valor", "Conta", "Forma Pgto", "Status", "Conciliado", "Obs", "Saldo"]
+            for title in titles:
+                if not title or title.casefold() in excluded:
+                    continue
+                values = self.service.spreadsheets().values().get(spreadsheetId=self.spreadsheet_id, range=f"'{title}'!A:M").execute().get("values", [])
+                if not values:
+                    self.service.spreadsheets().values().update(spreadsheetId=self.spreadsheet_id, range=f"'{title}'!A1:M1", valueInputOption="USER_ENTERED", body={"values": [target_headers]}).execute()
+                    continue
+                header = [str(v).strip().casefold() for v in values[0]]
+                if "escopo" in header and "forma pgto" in header and "saldo" in header:
+                    continue
+                migrated = [target_headers]
+                running = 0.0
+                for old in values[1:]:
+                    if not any(str(v).strip() for v in old):
+                        continue
+                    movement = str(old[2] if len(old) > 2 else "DESPESA").strip().upper()
+                    is_income = movement == "RECEITA" or movement in ("E", "ENTRADA")
+                    value = self._parse_value(old[5] if len(old) > 5 else 0)
+                    running += value if is_income else -value
+                    bank = old[11] if len(old) > 11 else ""
+                    payment = old[12] if len(old) > 12 else ""
+                    old_phone = old[7] if len(old) > 7 else ""
+                    old_name = old[8] if len(old) > 8 else ""
+                    old_id = old[9] if len(old) > 9 else ""
+                    raw = old[10] if len(old) > 10 else ""
+                    migrated.append([
+                        old[0] if len(old) > 0 else "",
+                        old[1] if len(old) > 1 else "PF",
+                        old[3] if len(old) > 3 else "Outro",
+                        "",
+                        "E" if is_income else "S",
+                        old[4] if len(old) > 4 else "",
+                        value,
+                        bank,
+                        payment,
+                        "Recebido" if is_income else "Pago",
+                        False,
+                        raw,
+                        running,
+                    ])
+                self.service.spreadsheets().values().clear(spreadsheetId=self.spreadsheet_id, range=f"'{title}'!A:M").execute()
+                self.service.spreadsheets().values().update(spreadsheetId=self.spreadsheet_id, range=f"'{title}'!A1:M{len(migrated)}", valueInputOption="USER_ENTERED", body={"values": migrated}).execute()
+        except Exception as error:
+            print(f"[Google Sheets] migração de layout não concluída: {error}")
 
     def get_sheet_by_month(self):
         configured_name = os.getenv("SHEET_NAME", "").strip()
@@ -63,7 +116,7 @@ class SheetsHandler:
                 if message_id and message_id in self._processed_message_ids:
                     return True, "✅ Esta mensagem já foi processada; não registrei novamente."
                 sheet_name = self._sheet_for_date(transaction_date)
-                headers = [["Data", "Tipo", "Movimento", "Categoria", "Descrição", "Valor", "Saldo", "Telefone", "Nome", "ID da mensagem", "Mensagem original", "Banco", "Forma de pagamento"]]
+                headers = [["Data", "Escopo", "Categoria", "Código", "Tipo", "Descrição", "Valor", "Conta", "Forma Pgto", "Status", "Conciliado", "Obs", "Saldo"]]
                 self.service.spreadsheets().values().update(
                     spreadsheetId=self.spreadsheet_id, range=f"'{sheet_name}'!A1:M1",
                     valueInputOption="USER_ENTERED", body={"values": headers}
@@ -76,7 +129,7 @@ class SheetsHandler:
                 values = self.service.spreadsheets().values().get(
                     spreadsheetId=self.spreadsheet_id, range=f"'{sheet_name}'!A:M"
                 ).execute().get("values", [])
-                if message_id and any(len(existing) > 9 and str(existing[9]).strip() == str(message_id) for existing in values[1:]):
+                if message_id and any(len(existing) > 11 and str(message_id) in str(existing[11]) for existing in values[1:]):
                     self._processed_message_ids.add(message_id)
                     return True, "✅ Esta mensagem já foi processada; não registrei novamente."
                 previous_balance = 0.0
@@ -85,20 +138,22 @@ class SheetsHandler:
                         previous_balance = self._parse_value(existing[6])
                 signed_value = float(valor) if tipo_movimento.upper() == "RECEITA" else -float(valor)
                 balance = previous_balance + signed_value
+                movement_code = "E" if tipo_movimento.upper() == "RECEITA" else "S"
+                status = "Recebido" if movement_code == "E" else "Pago"
                 row = [
                     date_value.strftime("%d/%m/%Y %H:%M:%S"),
                     tipo_pj_pf,
-                    tipo_movimento,
                     categoria,
+                    "",
+                    movement_code,
                     descricao,
                     float(valor),
-                    balance,
-                    phone_number,
-                    contact_name,
-                    message_id,
-                    raw_message,
                     bank or "",
                     payment_method or "",
+                    status,
+                    False,
+                        f"Telefone: {old_phone} | Nome: {old_name} | ID: {old_id} | {raw}".strip(" |"),
+                    balance,
                 ]
                 range_name = f"'{sheet_name}'!A:M"
                 self.service.spreadsheets().values().append(
@@ -126,16 +181,12 @@ class SheetsHandler:
             ).execute().get("values", [])
             summary = {"receita": 0.0, "despesa": 0.0, "investimento": 0.0, "saldo": 0.0}
             for row in values[1:]:
-                if len(row) < 6 or row[1] != tipo_pj_pf:
+                if len(row) < 7 or row[1] != tipo_pj_pf:
                     continue
-                try:
-                    value = float(str(row[5]).replace(".", "").replace(",", "."))
-                except ValueError:
-                    continue
-                movement = row[2].upper()
+                value = self._parse_value(row[6])
+                movement = "RECEITA" if str(row[4]).upper() in ("E", "ENTRADA", "RECEITA", "RECEBIDO") else "DESPESA"
                 if movement == "RECEITA": summary["receita"] += value
                 elif movement == "DESPESA": summary["despesa"] += value
-                elif movement == "INVESTIMENTO": summary["investimento"] += value
             summary["saldo"] = summary["receita"] - summary["despesa"]
             return summary
         except Exception as error:
@@ -181,12 +232,12 @@ class SheetsHandler:
             month_titles = [title for title in titles if title and title.casefold() not in excluded]
             rows = []
             read_titles = [title for title in month_titles if not month or month == "todos" or title.casefold() == month.casefold()]
-            ranges = [f"'{title}'!A:F" for title in read_titles]
+            ranges = [f"'{title}'!A:M" for title in read_titles]
             batch = self.service.spreadsheets().values().batchGet(spreadsheetId=self.spreadsheet_id, ranges=ranges, majorDimension="ROWS").execute().get("valueRanges", [])
             for title, value_range in zip(read_titles, batch):
                 values = value_range.get("values", [])
                 for row in values[1:]:
-                    if len(row) < 6:
+                    if len(row) < 7:
                         continue
                     row_date = self._parse_date(row[0])
                     row_type = str(row[1]).strip().upper()
@@ -199,7 +250,8 @@ class SheetsHandler:
                         selected_period = bool(row_date and row_date.strftime("%Y-%m") == month)
                         if not selected_sheet and not selected_period:
                             continue
-                    rows.append({"date": row[0], "parsed_date": row_date, "type": row_type, "movement": str(row[2]).strip().upper(), "category": row[3] if len(row) > 3 else "Sem categoria", "description": row[4] if len(row) > 4 else "", "value": self._parse_value(row[5]), "sheet": title})
+                    movement = "RECEITA" if str(row[4]).strip().upper() in ("E", "ENTRADA", "RECEITA", "RECEBIDO") else "DESPESA"
+                    rows.append({"date": row[0], "parsed_date": row_date, "type": row_type, "movement": movement, "category": row[2] if len(row) > 2 else "Sem categoria", "description": row[5] if len(row) > 5 else "", "value": self._parse_value(row[6]), "bank": row[7] if len(row) > 7 else "", "payment_method": row[8] if len(row) > 8 else "", "sheet": title})
             metrics = {"receita": 0.0, "despesa": 0.0, "investimento": 0.0, "saldo": 0.0, "count": len(rows)}
             categories = {}
             types = {"PF": 0.0, "PJ": 0.0}
@@ -341,12 +393,14 @@ class SheetsHandler:
             values = self.service.spreadsheets().values().get(spreadsheetId=self.spreadsheet_id, range=f"'{self.get_sheet_by_month()}'!A:K").execute().get("values", [])
             found = []
             for idx, row in enumerate(values[1:], start=2):
-                if len(row) < 6 or (tipo and row[1] != tipo) or (phone_number and len(row) > 7 and row[7] != phone_number):
+                if len(row) < 7 or (tipo and row[1] != tipo):
                     continue
                 haystack = " ".join(str(x) for x in row).casefold()
+                if phone_number and f"telefone: {phone_number}" not in haystack:
+                    continue
                 if keyword and keyword.casefold() not in haystack:
                     continue
-                found.append({"row": idx, "date": row[0], "type": row[1], "movement": row[2], "category": row[3], "description": row[4], "value": row[5]})
+                found.append({"row": idx, "date": row[0], "type": row[1], "movement": row[4], "category": row[2], "description": row[5], "value": row[6]})
                 if len(found) >= limit:
                     break
             return found
@@ -358,7 +412,7 @@ class SheetsHandler:
         if not self.service or not self.spreadsheet_id:
             return False
         try:
-            self.service.spreadsheets().values().clear(spreadsheetId=self.spreadsheet_id, range=f"'{self.get_sheet_by_month()}'!A{row_number}:K{row_number}").execute()
+            self.service.spreadsheets().values().clear(spreadsheetId=self.spreadsheet_id, range=f"'{self.get_sheet_by_month()}'!A{row_number}:M{row_number}").execute()
             return True
         except Exception as error:
             print(f"[Google Sheets] erro ao apagar transação: {error}")
@@ -368,16 +422,16 @@ class SheetsHandler:
         if not self.service or not self.spreadsheet_id:
             return False
         try:
-            row = self.service.spreadsheets().values().get(spreadsheetId=self.spreadsheet_id, range=f"'{self.get_sheet_by_month()}'!A{row_number}:K{row_number}").execute().get("values", [[]])[0]
-            while len(row) < 11:
+            row = self.service.spreadsheets().values().get(spreadsheetId=self.spreadsheet_id, range=f"'{self.get_sheet_by_month()}'!A{row_number}:M{row_number}").execute().get("values", [[]])[0]
+            while len(row) < 13:
                 row.append("")
             if value is not None:
-                row[5] = float(value)
+                row[6] = float(value)
             if category:
-                row[3] = category
+                row[2] = category
             if description:
-                row[4] = description
-            self.service.spreadsheets().values().update(spreadsheetId=self.spreadsheet_id, range=f"'{self.get_sheet_by_month()}'!A{row_number}:K{row_number}", valueInputOption="USER_ENTERED", body={"values": [row]}).execute()
+                row[5] = description
+            self.service.spreadsheets().values().update(spreadsheetId=self.spreadsheet_id, range=f"'{self.get_sheet_by_month()}'!A{row_number}:M{row_number}", valueInputOption="USER_ENTERED", body={"values": [row]}).execute()
             return True
         except Exception as error:
             print(f"[Google Sheets] erro ao atualizar transação: {error}")
