@@ -55,6 +55,9 @@ class SheetsHandler:
                     continue
                 header = [str(v).strip().casefold() for v in values[0]]
                 if "escopo" in header and "forma pgto" in header and "saldo" in header:
+                    if len(values) > 1:
+                        formulas = [[f'=IF(E{row_number}="E",G{row_number},-G{row_number})' if row_number == 2 else f'=M{row_number - 1}+IF(E{row_number}="E",G{row_number},-G{row_number})'] for row_number in range(2, len(values) + 1)]
+                        self.service.spreadsheets().values().update(spreadsheetId=self.spreadsheet_id, range=f"'{title}'!M2:M{len(values)}", valueInputOption="USER_ENTERED", body={"values": formulas}).execute()
                     continue
                 migrated = [target_headers]
                 for old in values[1:]:
