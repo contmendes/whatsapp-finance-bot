@@ -1,6 +1,7 @@
 import json
 import os
 from datetime import datetime
+from threading import Lock
 from time import monotonic
 
 from google.oauth2.service_account import Credentials
@@ -17,6 +18,8 @@ class SheetsHandler:
         # Compatibilidade com a planilha usada pelas versões anteriores do bot.
         self.spreadsheet_id = os.getenv("SPREADSHEET_ID", "1DblcpVwhnErzxtlh3ZEQJ7qpjTZMJO0Di_ygFTZFifI")
         self._dashboard_cache = {}
+        self._write_lock = Lock()
+        self._processed_message_ids = set()
         self._authenticate()
 
     def _authenticate(self):
@@ -41,33 +44,74 @@ class SheetsHandler:
             return configured_name
         return ["Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho", "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"][datetime.now().month - 1]
 
-    def add_transaction(self, tipo_pj_pf, tipo_movimento, categoria, descricao, valor, phone_number="", contact_name="", message_id="", raw_message=""):
+    def _sheet_for_date(self, transaction_date=None):
+        configured_name = os.getenv("SHEET_NAME", "").strip()
+        if configured_name:
+            return configured_name
+        date_value = transaction_date or datetime.now().strftime("%Y-%m-%d")
+        try:
+            parsed = datetime.strptime(str(date_value)[:10], "%Y-%m-%d")
+        except ValueError:
+            parsed = datetime.now()
+        return ["Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho", "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"][parsed.month - 1]
+
+    def add_transaction(self, tipo_pj_pf, tipo_movimento, categoria, descricao, valor, phone_number="", contact_name="", message_id="", raw_message="", transaction_date=None, bank="", payment_method=""):
         if not self.service or not self.spreadsheet_id:
             return False, "❌ Google Sheets não está configurado no Render."
         try:
-            row = [
-                datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
-                tipo_pj_pf,
-                tipo_movimento,
-                categoria,
-                descricao,
-                float(valor),
-                "",
-                phone_number,
-                contact_name,
-                message_id,
-                raw_message,
-            ]
-            range_name = f"'{self.get_sheet_by_month()}'!A:K"
-            self.service.spreadsheets().values().append(
-                spreadsheetId=self.spreadsheet_id,
-                range=range_name,
-                valueInputOption="USER_ENTERED",
-                insertDataOption="INSERT_ROWS",
-                body={"values": [row]},
-            ).execute()
+            with self._write_lock:
+                if message_id and message_id in self._processed_message_ids:
+                    return True, "✅ Esta mensagem já foi processada; não registrei novamente."
+                sheet_name = self._sheet_for_date(transaction_date)
+                headers = [["Data", "Tipo", "Movimento", "Categoria", "Descrição", "Valor", "Saldo", "Telefone", "Nome", "ID da mensagem", "Mensagem original", "Banco", "Forma de pagamento"]]
+                self.service.spreadsheets().values().update(
+                    spreadsheetId=self.spreadsheet_id, range=f"'{sheet_name}'!A1:M1",
+                    valueInputOption="USER_ENTERED", body={"values": headers}
+                ).execute()
+                date_text = str(transaction_date or "")[:10]
+                try:
+                    date_value = datetime.strptime(date_text, "%Y-%m-%d") if date_text else datetime.now()
+                except ValueError:
+                    date_value = datetime.now()
+                values = self.service.spreadsheets().values().get(
+                    spreadsheetId=self.spreadsheet_id, range=f"'{sheet_name}'!A:M"
+                ).execute().get("values", [])
+                if message_id and any(len(existing) > 9 and str(existing[9]).strip() == str(message_id) for existing in values[1:]):
+                    self._processed_message_ids.add(message_id)
+                    return True, "✅ Esta mensagem já foi processada; não registrei novamente."
+                previous_balance = 0.0
+                for existing in values[1:]:
+                    if len(existing) > 6 and str(existing[6]).strip():
+                        previous_balance = self._parse_value(existing[6])
+                signed_value = float(valor) if tipo_movimento.upper() == "RECEITA" else -float(valor)
+                balance = previous_balance + signed_value
+                row = [
+                    date_value.strftime("%d/%m/%Y %H:%M:%S"),
+                    tipo_pj_pf,
+                    tipo_movimento,
+                    categoria,
+                    descricao,
+                    float(valor),
+                    balance,
+                    phone_number,
+                    contact_name,
+                    message_id,
+                    raw_message,
+                    bank or "",
+                    payment_method or "",
+                ]
+                range_name = f"'{sheet_name}'!A:M"
+                self.service.spreadsheets().values().append(
+                    spreadsheetId=self.spreadsheet_id,
+                    range=range_name,
+                    valueInputOption="USER_ENTERED",
+                    insertDataOption="INSERT_ROWS",
+                    body={"values": [row]},
+                ).execute()
+                if message_id:
+                    self._processed_message_ids.add(message_id)
             self._dashboard_cache.clear()
-            return True, f"✅ Transação registrada na aba '{self.get_sheet_by_month()}'."
+            return True, f"✅ Transação registrada na aba '{sheet_name}' em {date_value.strftime('%d/%m/%Y')}. Saldo: R$ {balance:.2f}"
         except Exception as error:
             print(f"[Google Sheets] erro ao adicionar transação: {error}")
             return False, "❌ Não consegui salvar na planilha. Verifique o acesso da conta de serviço."
@@ -78,7 +122,7 @@ class SheetsHandler:
         try:
             values = self.service.spreadsheets().values().get(
                 spreadsheetId=self.spreadsheet_id,
-                range=f"'{self.get_sheet_by_month()}'!A:K",
+                    range=f"'{self.get_sheet_by_month()}'!A:M",
             ).execute().get("values", [])
             summary = {"receita": 0.0, "despesa": 0.0, "investimento": 0.0, "saldo": 0.0}
             for row in values[1:]:

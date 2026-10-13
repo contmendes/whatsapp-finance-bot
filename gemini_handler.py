@@ -30,7 +30,7 @@ Não invente dados. Se um campo não estiver claro, use null e reduza confidence
 Mantenha a separação PF/PJ: tipo deve ser PF ou PJ.
 Categorias disponíveis: {category_text}
 Responda SOMENTE JSON válido com exatamente este formato:
-{{"tipo":"PF ou PJ","movimento":"DESPESA, RECEITA ou INVESTIMENTO","valor":number|null,"moeda":"BRL","data":"YYYY-MM-DD ou null","estabelecimento":"string ou null","descricao":"string","categoria":"string","confidence":number,"transcricao":"string ou null"}}
+{{"tipo":"PF ou PJ","movimento":"DESPESA, RECEITA ou INVESTIMENTO","valor":number|null,"moeda":"BRL","data":"YYYY-MM-DD ou null","estabelecimento":"string ou null","descricao":"string","categoria":"string","banco":"string ou null","forma_pagamento":"string ou null","confidence":number,"transcricao":"string ou null"}}
 """
         body = {
             "contents": [{"parts": [
@@ -51,10 +51,12 @@ Responda SOMENTE JSON válido com exatamente este formato:
                         "estabelecimento": {"type": "STRING", "nullable": True},
                         "descricao": {"type": "STRING"},
                         "categoria": {"type": "STRING"},
+                        "banco": {"type": "STRING", "nullable": True},
+                        "forma_pagamento": {"type": "STRING", "nullable": True},
                         "confidence": {"type": "NUMBER"},
                         "transcricao": {"type": "STRING", "nullable": True},
                     },
-                    "required": ["tipo", "movimento", "valor", "moeda", "data", "estabelecimento", "descricao", "categoria", "confidence", "transcricao"],
+                    "required": ["tipo", "movimento", "valor", "moeda", "data", "estabelecimento", "descricao", "categoria", "banco", "forma_pagamento", "confidence", "transcricao"],
                 },
             },
         }
@@ -88,7 +90,7 @@ A separação PF/PJ é obrigatória. Se o usuário não mencionar, use {context_
 Categorias disponíveis: {category_text}
 Mensagem: {message}
 Responda SOMENTE JSON com este formato:
-{{"intent":"launch|summary|balance|search|profile|categories|switch_context|help|delete_last|edit_last|unknown","tipo":"PF ou PJ","movimento":"DESPESA|RECEITA|INVESTIMENTO","valor":number,"categoria":"string","descricao":"string","keyword":"string","mes":"YYYY-MM ou todos","contexto":"PF ou PJ","confidence":number,"reply":"string"}}
+{{"intent":"launch|summary|balance|search|profile|categories|switch_context|help|delete_last|edit_last|unknown","tipo":"PF ou PJ","movimento":"DESPESA|RECEITA|INVESTIMENTO","valor":number,"data":"YYYY-MM-DD ou null","categoria":"string","descricao":"string","banco":"string","forma_pagamento":"string","keyword":"string","mes":"YYYY-MM ou todos","contexto":"PF ou PJ","confidence":number,"reply":"string"}}
 """
         body = {
             "contents": [{"parts": [{"text": prompt}]}],
@@ -102,15 +104,18 @@ Responda SOMENTE JSON com este formato:
                         "tipo": {"type": "STRING", "enum": ["PF", "PJ"]},
                         "movimento": {"type": "STRING", "enum": ["DESPESA", "RECEITA", "INVESTIMENTO"]},
                         "valor": {"type": "NUMBER", "nullable": True},
+                        "data": {"type": "STRING", "nullable": True},
                         "categoria": {"type": "STRING"},
                         "descricao": {"type": "STRING"},
+                        "banco": {"type": "STRING"},
+                        "forma_pagamento": {"type": "STRING"},
                         "keyword": {"type": "STRING"},
                         "mes": {"type": "STRING"},
                         "contexto": {"type": "STRING", "enum": ["PF", "PJ"]},
                         "confidence": {"type": "NUMBER"},
                         "reply": {"type": "STRING"},
                     },
-                    "required": ["intent", "tipo", "movimento", "valor", "categoria", "descricao", "keyword", "mes", "contexto", "confidence", "reply"],
+                    "required": ["intent", "tipo", "movimento", "valor", "data", "categoria", "descricao", "banco", "forma_pagamento", "keyword", "mes", "contexto", "confidence", "reply"],
                 },
             },
         }

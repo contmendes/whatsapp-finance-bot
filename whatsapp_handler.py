@@ -1,5 +1,6 @@
 import os
 import re
+from datetime import datetime
 
 import requests
 
@@ -74,6 +75,67 @@ class WhatsAppHandler:
             return tipo_pj_pf, tipo_movimento, categoria, valor, descricao, None
         except Exception as error:
             return None, None, None, None, None, f"❌ Erro ao processar: {error}"
+
+    @staticmethod
+    def extract_date(text):
+        """Extrai datas brasileiras e referências a mês em português."""
+        original = text or ""
+        normalized = original.casefold()
+        today = datetime.now()
+        months = {
+            "janeiro": 1, "fevereiro": 2, "março": 3, "marco": 3,
+            "abril": 4, "maio": 5, "junho": 6, "julho": 7,
+            "agosto": 8, "setembro": 9, "outubro": 10,
+            "novembro": 11, "dezembro": 12,
+        }
+        match = re.search(r"\b(\d{1,2})[/-](\d{1,2})(?:[/-](\d{2,4}))?\b", normalized)
+        if match:
+            day, month = int(match.group(1)), int(match.group(2))
+            year = int(match.group(3)) if match.group(3) else today.year
+            if year < 100:
+                year += 2000
+            try:
+                return datetime(year, month, day).strftime("%Y-%m-%d")
+            except ValueError:
+                return None
+        match = re.search(r"(?:dia\s+)?(\d{1,2})\s+de\s+([a-zç]+)(?:\s+de\s+(\d{4}))?", normalized)
+        if match and match.group(2) in months:
+            year = int(match.group(3)) if match.group(3) else today.year
+            try:
+                return datetime(year, months[match.group(2)], int(match.group(1))).strftime("%Y-%m-%d")
+            except ValueError:
+                return None
+        for name, month in months.items():
+            if re.search(rf"\b(?:em|no mês de|mes de)\s+{re.escape(name)}\b", normalized):
+                return datetime(today.year, month, 1).strftime("%Y-%m-%d")
+        if re.search(r"\b(hoje|agora)\b", normalized):
+            return today.strftime("%Y-%m-%d")
+        if re.search(r"\bontem\b", normalized):
+            from datetime import timedelta
+            return (today - timedelta(days=1)).strftime("%Y-%m-%d")
+        return None
+
+    @staticmethod
+    def extract_payment_details(text):
+        """Extrai banco e meio de pagamento sem exigir formato rígido."""
+        normalized = (text or "").casefold()
+        bank = ""
+        payment = ""
+        for name in ("nubank", "inter", "itau", "itaú", "bradesco", "santander", "caixa", "bb", "banco do brasil", "mercado pago", "picpay"):
+            if re.search(rf"\b{re.escape(name)}\b", normalized):
+                bank = name.title()
+                break
+        payment_patterns = [
+            (r"pix", "Pix"), (r"cartão de crédito|cartao de credito|crédito|credito", "Cartão de crédito"),
+            (r"cartão de débito|cartao de debito|débito|debito", "Cartão de débito"),
+            (r"dinheiro|espécie|especie", "Dinheiro"), (r"boleto", "Boleto"),
+            (r"transferência|transferencia|ted|doc", "Transferência"),
+        ]
+        for pattern, label in payment_patterns:
+            if re.search(pattern, normalized):
+                payment = label
+                break
+        return bank, payment
 
     def get_help_message(self):
         return """📱 *Maria Financeira*

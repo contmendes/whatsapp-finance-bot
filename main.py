@@ -2,6 +2,7 @@ import hashlib
 import hmac
 import os
 import re
+from threading import Lock, Thread
 
 import requests
 
@@ -29,6 +30,8 @@ DASHBOARD_TOKEN = os.getenv("DASHBOARD_TOKEN", "").strip()
 pending_deletions = {}
 pending_media = {}
 pending_ai = {}
+received_message_ids = set()
+received_message_lock = Lock()
 
 
 def is_valid_signature() -> bool:
@@ -93,21 +96,30 @@ def handle_message():
                 }
                 for message in value.get("messages", []):
                     from_number = message.get("from", "")
+                    message_id = message.get("id", "")
+                    if message_id:
+                        with received_message_lock:
+                            if message_id in received_message_ids:
+                                print(f"[Webhook] mensagem duplicada ignorada: {message_id}")
+                                continue
+                            received_message_ids.add(message_id)
+                            if len(received_message_ids) > 10000:
+                                received_message_ids.clear()
                     message_type = message.get("type")
                     if message_type != "text":
                         if message_type in ("audio", "image", "document"):
-                            process_media_message(from_number, message, contacts.get(from_number, ""))
+                            Thread(target=process_media_message, args=(from_number, message, contacts.get(from_number, ""), message_id), daemon=True).start()
                         continue
                     message_text = message.get("text", {}).get("body", "").strip()
                     if message_text:
-                        process_user_message(from_number, message_text, contacts.get(from_number, ""), message.get("id", ""))
+                        Thread(target=process_user_message, args=(from_number, message_text, contacts.get(from_number, ""), message_id), daemon=True).start()
         return jsonify({"status": "ok"}), 200
     except Exception as error:
         print(f"[Webhook] erro ao processar mensagem: {error}")
         return jsonify({"error": "processing failed"}), 500
 
 
-def process_media_message(phone_number, message, contact_name=""):
+def process_media_message(phone_number, message, contact_name="", message_id=""):
     if not gemini.configured:
         whatsapp.send_message(phone_number, "📎 Recebi o arquivo, mas a análise ainda não está configurada. Envie o lançamento por texto por enquanto.")
         return
@@ -120,12 +132,13 @@ def process_media_message(phone_number, message, contact_name=""):
             whatsapp.send_message(phone_number, f"📎 {error or 'Não consegui ler o arquivo.'}")
             return
         pending_media[phone_number] = result
+        result["message_id"] = message_id
         date_text = result.get("data") or "hoje"
         establishment = result.get("estabelecimento") or "não identificado"
         category = result.get("categoria") or "Outro"
         transcript = result.get("transcricao")
         extra = f"\nTranscrição: {transcript}" if transcript else ""
-        whatsapp.send_message(phone_number, f"🔎 *Encontrei este lançamento:*\n\nValor: R$ {result['valor']:.2f}\nTipo: {result['tipo']}\nMovimento: {result['movimento']}\nCategoria: {category}\nEstabelecimento: {establishment}\nData: {date_text}{extra}\n\nResponda *CONFIRMAR* para registrar ou *CANCELAR* para descartar.")
+        whatsapp.send_message(phone_number, f"🔎 *Encontrei este lançamento:*\n\nValor: R$ {result['valor']:.2f}\nTipo: {result['tipo']}\nMovimento: {result['movimento']}\nCategoria: {category}\nEstabelecimento: {establishment}\nData: {date_text}\nBanco: {result.get('banco') or 'não informado'}\nPagamento: {result.get('forma_pagamento') or 'não informado'}{extra}\n\nResponda *CONFIRMAR* para registrar ou *CANCELAR* para descartar.")
     except Exception as error:
         print(f"[Media] erro ao processar arquivo: {error}")
         whatsapp.send_message(phone_number, "📎 Recebi o arquivo, mas não consegui analisá-lo. Envie uma foto mais nítida ou uma mensagem de texto.")
@@ -138,11 +151,11 @@ def process_user_message(phone_number, message_text, contact_name="", message_id
 
     if message_upper in ("SIM", "CONFIRMAR", "CONFIRMO") and phone_number in pending_media:
         result = pending_media.pop(phone_number)
-        sucesso, mensagem = sheets.add_transaction(result["tipo"], result["movimento"], result.get("categoria") or "Outro", result.get("descricao") or result.get("estabelecimento") or "Lançamento via mídia", result["valor"], phone_number=phone_number, contact_name=contact_name, message_id=message_id, raw_message=result.get("transcricao") or "mídia analisada pelo Gemini")
+        sucesso, mensagem = sheets.add_transaction(result["tipo"], result["movimento"], result.get("categoria") or "Outro", result.get("descricao") or result.get("estabelecimento") or "Lançamento via mídia", result["valor"], phone_number=phone_number, contact_name=contact_name, message_id=result.get("message_id") or message_id, raw_message=result.get("transcricao") or "mídia analisada pelo Gemini", transaction_date=result.get("data"), bank=result.get("banco") or "", payment_method=result.get("forma_pagamento") or "")
         response = mensagem if sucesso else mensagem
     elif message_upper in ("SIM", "CONFIRMAR", "CONFIRMO") and phone_number in pending_ai:
         result = pending_ai.pop(phone_number)
-        sucesso, mensagem = sheets.add_transaction(result["tipo"], result["movimento"], result.get("categoria") or "Outro", result.get("descricao") or "Lançamento via texto", result["valor"], phone_number=phone_number, contact_name=contact_name, message_id=message_id, raw_message=result.get("raw_message") or "texto interpretado pelo Gemini")
+        sucesso, mensagem = sheets.add_transaction(result["tipo"], result["movimento"], result.get("categoria") or "Outro", result.get("descricao") or "Lançamento via texto", result["valor"], phone_number=phone_number, contact_name=contact_name, message_id=result.get("message_id") or message_id, raw_message=result.get("raw_message") or "texto interpretado pelo Gemini", transaction_date=result.get("data"), bank=result.get("banco") or "", payment_method=result.get("forma_pagamento") or "")
         response = mensagem if sucesso else mensagem
     elif message_upper in ("NÃO", "NAO", "CANCELAR") and phone_number in pending_media:
         pending_media.pop(phone_number, None)
@@ -212,12 +225,35 @@ def process_user_message(phone_number, message_text, contact_name="", message_id
                 response = "✅ Último lançamento corrigido." if ok else "❌ Não consegui corrigir o lançamento."
     elif response is None:
         categories = sheets.get_categories()
-        interpreted, _ = gemini.interpret_text(message_text, profile["context"], categories) if gemini.configured else (None, "not configured")
+        quick_launch = bool(re.search(r"\b(gastei|gastar|paguei|pagar|comprei|comprar|recebi|receber|ganhei|ganhar|investi|investir|despesa|receita|investimento)\b", message_text, flags=re.I))
+        quick_value, _ = whatsapp._extract_amount(message_text)
+        if quick_launch and quick_value and quick_value > 0:
+            tipo_pj_pf, tipo_movimento, categoria, valor, descricao, erro = whatsapp.parse_message(message_text, categories=categories, default_type=profile["context"])
+            if not erro:
+                transaction_date = whatsapp.extract_date(message_text)
+                bank, payment = whatsapp.extract_payment_details(message_text)
+                sucesso, mensagem = sheets.add_transaction(tipo_pj_pf, tipo_movimento, categoria, descricao, valor, phone_number=phone_number, contact_name=contact_name, message_id=message_id, raw_message=message_text, transaction_date=transaction_date, bank=bank, payment_method=payment)
+                response = mensagem
+        if response is not None:
+            interpreted = {"intent": "handled"}
+        elif gemini.configured:
+            interpreted, _ = gemini.interpret_text(message_text, profile["context"], categories)
+        else:
+            interpreted = None
         intent = interpreted.get("intent") if interpreted and interpreted.get("confidence", 0) >= 0.55 else None
-        if intent == "launch" and (interpreted.get("valor") or 0) > 0:
+        if response is not None:
+            intent = "handled"
+        if intent == "handled":
+            pass
+        elif intent == "launch" and (interpreted.get("valor") or 0) > 0:
             interpreted["raw_message"] = message_text
+            interpreted["message_id"] = message_id
+            interpreted["data"] = interpreted.get("data") or whatsapp.extract_date(message_text)
+            bank, payment = whatsapp.extract_payment_details(message_text)
+            interpreted["banco"] = interpreted.get("banco") or bank
+            interpreted["forma_pagamento"] = interpreted.get("forma_pagamento") or payment
             pending_ai[phone_number] = interpreted
-            response = f"🔎 Entendi assim:\n\n{interpreted.get('tipo', profile['context'])} · {interpreted.get('movimento', 'DESPESA')}\nR$ {float(interpreted['valor']):.2f} · {interpreted.get('categoria') or 'Outro'}\n{interpreted.get('descricao') or 'Sem descrição'}\n\nResponda *CONFIRMAR* para registrar ou *CANCELAR* para descartar."
+            response = f"🔎 Entendi assim:\n\n{interpreted.get('tipo', profile['context'])} · {interpreted.get('movimento', 'DESPESA')}\nR$ {float(interpreted['valor']):.2f} · {interpreted.get('categoria') or 'Outro'}\n{interpreted.get('descricao') or 'Sem descrição'}\nData: {interpreted.get('data') or 'hoje'}\nBanco: {interpreted.get('banco') or 'não informado'}\nPagamento: {interpreted.get('forma_pagamento') or 'não informado'}\n\nResponda *CONFIRMAR* para registrar ou *CANCELAR* para descartar."
         elif intent in ("summary", "balance"):
             tipo = interpreted.get("tipo") if interpreted.get("tipo") in ("PF", "PJ") else profile["context"]
             summary = sheets.get_summary(tipo)
@@ -240,7 +276,9 @@ def process_user_message(phone_number, message_text, contact_name="", message_id
             if erro:
                 response = erro + "\n\nVocê pode escrever de forma livre, como: *gastei 45 no almoço*."
             else:
-                sucesso, mensagem = sheets.add_transaction(tipo_pj_pf, tipo_movimento, categoria, descricao, valor, phone_number=phone_number, contact_name=contact_name, message_id=message_id, raw_message=message_text)
+                transaction_date = whatsapp.extract_date(message_text)
+                bank, payment = whatsapp.extract_payment_details(message_text)
+                sucesso, mensagem = sheets.add_transaction(tipo_pj_pf, tipo_movimento, categoria, descricao, valor, phone_number=phone_number, contact_name=contact_name, message_id=message_id, raw_message=message_text, transaction_date=transaction_date, bank=bank, payment_method=payment)
                 response = mensagem
 
     if response:
