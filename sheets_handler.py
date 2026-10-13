@@ -57,14 +57,12 @@ class SheetsHandler:
                 if "escopo" in header and "forma pgto" in header and "saldo" in header:
                     continue
                 migrated = [target_headers]
-                running = 0.0
                 for old in values[1:]:
                     if not any(str(v).strip() for v in old):
                         continue
                     movement = str(old[2] if len(old) > 2 else "DESPESA").strip().upper()
                     is_income = movement == "RECEITA" or movement in ("E", "ENTRADA")
                     value = self._parse_value(old[5] if len(old) > 5 else 0)
-                    running += value if is_income else -value
                     bank = old[11] if len(old) > 11 else ""
                     payment = old[12] if len(old) > 12 else ""
                     old_phone = old[7] if len(old) > 7 else ""
@@ -84,8 +82,10 @@ class SheetsHandler:
                         "Recebido" if is_income else "Pago",
                         False,
                         raw,
-                        running,
+                        "",
                     ])
+                for row_number in range(2, len(migrated) + 1):
+                    migrated[row_number - 1][12] = f'=IF(E{row_number}="E",G{row_number},-G{row_number})' if row_number == 2 else f'=M{row_number - 1}+IF(E{row_number}="E",G{row_number},-G{row_number})'
                 self.service.spreadsheets().values().clear(spreadsheetId=self.spreadsheet_id, range=f"'{title}'!A:M").execute()
                 self.service.spreadsheets().values().update(spreadsheetId=self.spreadsheet_id, range=f"'{title}'!A1:M{len(migrated)}", valueInputOption="USER_ENTERED", body={"values": migrated}).execute()
         except Exception as error:
@@ -153,7 +153,7 @@ class SheetsHandler:
                     status,
                     False,
                         f"Telefone: {old_phone} | Nome: {old_name} | ID: {old_id} | {raw}".strip(" |"),
-                    balance,
+                    f'=IF(E{len(values) + 1}="E",G{len(values) + 1},-G{len(values) + 1})' if len(values) == 1 else f'=M{len(values)}+IF(E{len(values) + 1}="E",G{len(values) + 1},-G{len(values) + 1})',
                 ]
                 range_name = f"'{sheet_name}'!A:M"
                 self.service.spreadsheets().values().append(
