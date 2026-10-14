@@ -30,12 +30,16 @@ Nunca publique tokens ou o JSON da conta de serviço no GitHub. O arquivo `.env.
 1. Ative a Google Sheets API no Google Cloud.
 2. Crie uma Service Account e gere uma chave JSON.
 3. Compartilhe a planilha com o valor `client_email` da Service Account, com permissão de Editor.
-4. Crie uma aba chamada `Lançamentos` ou defina outro nome em `SHEET_NAME`.
-5. Use estes cabeçalhos na primeira linha:
+4. Configure `SPREADSHEET_ID` com o ID da nova planilha e `SHEET_NAME=Lançamentos` no Render.
+5. Na aba `Lançamentos`, mantenha os cabeçalhos do novo modelo na primeira linha:
 
 ```text
-Data | Tipo | Movimento | Categoria | Descrição | Valor | Saldo | Telefone | Nome | ID da mensagem | Mensagem original
+Data | Mês | Ano | Escopo | Categoria | Código | Tipo | Descrição | Valor | Conta | Forma Pgto | Status | Conciliado | Meta | Saldo | Usuário | ID
 ```
+
+O bot identifica as colunas pelos cabeçalhos, não pela posição. Ele preenche Data, Mês, Ano, Escopo, Categoria, Código, Tipo (`E` para entrada e `S` para saída), Descrição, Valor, Conta, Forma Pgto, Status, Usuário e ID. `Conciliado` e `Saldo` ficam sob controle da planilha (checkbox/fórmula), e `Meta` fica vazio salvo futura configuração. A aba `Config` deve conservar o plano de contas e as opções de categorias, contas, pagamentos e status usados nas listas suspensas.
+
+O bot grava na primeira linha sem lançamento, começando na linha 2. Para evitar duplicações, a coluna `ID` deve permanecer disponível para o identificador da mensagem do WhatsApp.
 
 ## Render
 

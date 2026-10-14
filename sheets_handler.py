@@ -10,16 +10,31 @@ from categories import CATEGORIES
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
+NEW_SPREADSHEET_ID = "1zGh1L0cYQ6nRN-ZkEfXzQvgTxSHZhWSu07ss3I5tHjQ"
+MONTHS_PT = ["janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"]
+HEADER_ALIASES = {
+    "date": ("data",), "month": ("mês", "mes"), "year": ("ano",),
+    "scope": ("escopo",), "category": ("categoria",), "code": ("código", "codigo"),
+    "movement_type": ("tipo",), "description": ("descrição", "descricao"),
+    "value": ("valor",), "account": ("conta",),
+    "payment": ("forma pgto", "forma de pagamento"), "status": ("status",),
+    "reconciled": ("conciliado",), "goal": ("meta",), "balance": ("saldo",),
+    "user": ("usuário", "usuario"), "id": ("id", "id da mensagem"),
+    "raw_message": ("mensagem original", "mensagem", "obs"),
+}
+
 
 class SheetsHandler:
     def __init__(self):
         self.service = None
         self.credentials = None
         # Compatibilidade com a planilha usada pelas versões anteriores do bot.
-        self.spreadsheet_id = os.getenv("SPREADSHEET_ID", "1DblcpVwhnErzxtlh3ZEQJ7qpjTZMJO0Di_ygFTZFifI")
+        self.spreadsheet_id = os.getenv("SPREADSHEET_ID", NEW_SPREADSHEET_ID)
         self._dashboard_cache = {}
         self._write_lock = Lock()
         self._processed_message_ids = set()
+        self._config_cache = None
+        self._config_cache_time = 0
         self._authenticate()
 
     def _authenticate(self):
@@ -147,20 +162,99 @@ class SheetsHandler:
 
     def get_sheet_by_month(self):
         configured_name = os.getenv("SHEET_NAME", "").strip()
-        if configured_name:
-            return configured_name
-        return ["Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho", "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"][datetime.now().month - 1]
+        return configured_name or "Lançamentos"
 
     def _sheet_for_date(self, transaction_date=None):
         configured_name = os.getenv("SHEET_NAME", "").strip()
-        if configured_name:
-            return configured_name
-        date_value = transaction_date or datetime.now().strftime("%Y-%m-%d")
+        return configured_name or "Lançamentos"
+
+    @staticmethod
+    def _normal_header(value):
+        return " ".join(str(value or "").strip().casefold().split())
+
+    def _header_map(self, header_row):
+        normalized = [self._normal_header(value) for value in header_row]
+        result = {}
+        for field, aliases in HEADER_ALIASES.items():
+            for alias in aliases:
+                if alias in normalized:
+                    result[field] = normalized.index(alias)
+                    break
+        return result
+
+    def _read_sheet(self, sheet_name=None):
+        name = sheet_name or self.get_sheet_by_month()
+        values = self.service.spreadsheets().values().get(
+            spreadsheetId=self.spreadsheet_id, range=f"'{name}'!A:Z"
+        ).execute().get("values", [])
+        header_idx = next((i for i, row in enumerate(values[:10])
+                           if "data" in [self._normal_header(x) for x in row]
+                           and ("escopo" in [self._normal_header(x) for x in row] or "tipo" in [self._normal_header(x) for x in row])
+                           and "valor" in [self._normal_header(x) for x in row]), None)
+        if header_idx is None:
+            raise ValueError(f"Não encontrei os cabeçalhos esperados na aba '{name}'.")
+        return values, header_idx, self._header_map(values[header_idx])
+
+    @staticmethod
+    def _get(row, columns, field, default=""):
+        index = columns.get(field)
+        return row[index] if index is not None and index < len(row) else default
+
+    @staticmethod
+    def _column_letter(index):
+        label = ""
+        index += 1
+        while index:
+            index, rem = divmod(index - 1, 26)
+            label = chr(65 + rem) + label
+        return label
+
+    def _config_rows(self):
+        if self._config_cache is not None and monotonic() - self._config_cache_time < 60:
+            return self._config_cache
         try:
-            parsed = datetime.strptime(str(date_value)[:10], "%Y-%m-%d")
-        except ValueError:
-            parsed = datetime.now()
-        return ["Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho", "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"][parsed.month - 1]
+            rows = self.service.spreadsheets().values().get(
+                spreadsheetId=self.spreadsheet_id, range="'Config'!A:U"
+            ).execute().get("values", [])
+            self._config_cache = rows
+            self._config_cache_time = monotonic()
+            return rows
+        except Exception:
+            return []
+
+    def _category_code(self, category):
+        target = self._normal_header(category)
+        for row in self._config_rows()[2:]:
+            if len(row) > 1 and self._normal_header(row[1]) == target and row[0].strip():
+                return row[0].strip()
+        return ""
+
+    def _resolve_category(self, category, scope, movement):
+        """Garante que a categoria gravada exista na lista PF/PJ da aba Config."""
+        column = 18 if str(scope).upper() == "PJ" else 20
+        options = self._config_options(column)
+        by_key = {self._normal_header(option): option for option in options}
+        key = self._normal_header(category)
+        if key in by_key:
+            return by_key[key]
+        if not options:
+            return category or "Outro"
+        move = str(movement).upper()
+        candidates = []
+        for option in options:
+            name = self._normal_header(option)
+            code = self._category_code(option)
+            if move == "RECEITA" and ("outras receitas" in name or name.startswith("receita ")):
+                candidates.append(option)
+            elif move == "INVESTIMENTO" and (code.startswith("7.") or "investimento" in name):
+                candidates.append(option)
+            elif move != "RECEITA" and move != "INVESTIMENTO" and "outros" in name and not any(x in name for x in ("imposto", "financeiro")):
+                candidates.append(option)
+        return candidates[0] if candidates else options[0]
+
+    def _config_options(self, column_index):
+        return [str(row[column_index]).strip() for row in self._config_rows()[2:]
+                if len(row) > column_index and str(row[column_index]).strip()]
 
     def add_transaction(self, tipo_pj_pf, tipo_movimento, categoria, descricao, valor, phone_number="", contact_name="", message_id="", raw_message="", transaction_date=None, bank="", payment_method=""):
         if not self.service or not self.spreadsheet_id:
@@ -170,51 +264,73 @@ class SheetsHandler:
                 if message_id and message_id in self._processed_message_ids:
                     return True, "✅ Esta mensagem já foi processada; não registrei novamente."
                 sheet_name = self._sheet_for_date(transaction_date)
+                values, header_idx, columns = self._read_sheet(sheet_name)
+                required = ("date", "scope", "category", "movement_type", "description", "value", "status", "id")
+                if any(field not in columns for field in required):
+                    return False, "❌ Os cabeçalhos da aba Lançamentos não correspondem ao modelo esperado."
+                if message_id and any(str(self._get(existing, columns, "id")).strip() == str(message_id) for existing in values[header_idx + 1:]):
+                    self._processed_message_ids.add(message_id)
+                    return True, "✅ Esta mensagem já foi processada; não registrei novamente."
+
                 date_text = str(transaction_date or "")[:10]
                 try:
                     date_value = datetime.strptime(date_text, "%Y-%m-%d") if date_text else datetime.now()
                 except ValueError:
-                    date_value = datetime.now()
-                values = self.service.spreadsheets().values().get(
-                    spreadsheetId=self.spreadsheet_id, range=f"'{sheet_name}'!A:P"
-                ).execute().get("values", [])
-                if message_id and any(len(existing) > 14 and str(existing[14]).strip() == str(message_id) for existing in values[2:]):
-                    self._processed_message_ids.add(message_id)
-                    return True, "✅ Esta mensagem já foi processada; não registrei novamente."
-                movement_type = "Entrada" if tipo_movimento.upper() == "RECEITA" else "Saída"
-                status = "Recebido" if movement_type == "Entrada" else "Pago"
-                next_row = max(3, len(values) + 1)
-                row = [
-                    date_value.strftime("%d/%m/%Y %H:%M:%S"),
-                    datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
-                    tipo_pj_pf,
-                    categoria,
-                    movement_type,
-                    descricao,
-                    float(valor),
-                    bank or "",
-                    payment_method or "",
-                    status,
-                    False,
-                    f"Telefone: {phone_number} | Nome: {contact_name} | Mensagem: {raw_message}".strip(" |"),
-                    "",
-                    message_id,
-                    "",
-                ]
-                self.service.spreadsheets().values().append(
+                    date_value = self._parse_date(transaction_date) or datetime.now()
+                movement = str(tipo_movimento or "DESPESA").strip().upper()
+                is_income = movement in ("RECEITA", "ENTRADA", "E")
+                status = "Recebido" if is_income else "Pago"
+
+                account_options = self._config_options(6)
+                payment_options = self._config_options(4)
+                account = ""
+                bank_key = self._normal_header(bank)
+                if bank_key:
+                    possible = [option for option in account_options if bank_key in self._normal_header(option)]
+                    if possible:
+                        scope_hint = "empresas" if str(tipo_pj_pf).upper() == "PJ" else "pessoal"
+                        account = next((x for x in possible if scope_hint in self._normal_header(x)), possible[0])
+                payment = ""
+                method_key = self._normal_header(payment_method)
+                if method_key:
+                    possible = [option for option in payment_options if method_key in self._normal_header(option)]
+                    if account:
+                        payment = next((x for x in possible if self._normal_header(account) in self._normal_header(x)), "")
+                    payment = payment or (possible[0] if possible else payment_method)
+                categoria = self._resolve_category(categoria, tipo_pj_pf, movement)
+                category_code = self._category_code(categoria)
+
+                # A aba possui cabeçalho na linha 1 e dados a partir da linha 2.
+                # Ignoramos M (checkbox) e O (saldo calculado) para preservar controles/fórmulas.
+                occupied = ("date", "month", "year", "scope", "category", "code", "movement_type", "description", "value", "account", "payment", "status", "goal", "user", "id")
+                last_data_row = header_idx + 1
+                for offset, existing in enumerate(values[header_idx + 1:], start=header_idx + 2):
+                    if any(str(self._get(existing, columns, field)).strip() for field in occupied):
+                        last_data_row = offset
+                next_row = last_data_row + 1
+                user_value = f"{contact_name} ({phone_number})" if contact_name and phone_number else (contact_name or phone_number)
+                row_values = {
+                    "date": date_value.strftime("%d/%m/%Y"),
+                    "month": MONTHS_PT[date_value.month - 1],
+                    "year": date_value.year,
+                    "scope": str(tipo_pj_pf).upper(),
+                    "category": categoria,
+                    "code": category_code,
+                    "movement_type": "E" if is_income else "S",
+                    "description": descricao,
+                    "value": float(valor),
+                    "account": account,
+                    "payment": payment,
+                    "status": status,
+                    "goal": "",
+                    "user": user_value,
+                    "id": message_id,
+                }
+                writes = [{"range": f"'{sheet_name}'!{self._column_letter(columns[field])}{next_row}", "values": [[value]]}
+                          for field, value in row_values.items() if field in columns]
+                self.service.spreadsheets().values().batchUpdate(
                     spreadsheetId=self.spreadsheet_id,
-                    range=f"'{sheet_name}'!A:P",
-                    valueInputOption="USER_ENTERED",
-                    insertDataOption="INSERT_ROWS",
-                    body={"values": [row]},
-                ).execute()
-                opening_balance = f'IF(C{next_row}="PJ",$E$1,$B$1)'
-                balance_formula = f'=IF(G{next_row}="","",IF(LOWER(J{next_row})="pago",{opening_balance}-G{next_row},IF(LOWER(J{next_row})="recebido",{opening_balance}+G{next_row},{opening_balance})))' if next_row == 3 else f'=IF(G{next_row}="","",IF(LOWER(J{next_row})="pago",M{next_row - 1}-G{next_row},IF(LOWER(J{next_row})="recebido",M{next_row - 1}+G{next_row},M{next_row - 1})))'
-                self.service.spreadsheets().values().update(
-                    spreadsheetId=self.spreadsheet_id,
-                    range=f"'{sheet_name}'!M{next_row}",
-                    valueInputOption="USER_ENTERED",
-                    body={"values": [[balance_formula]]},
+                    body={"valueInputOption": "USER_ENTERED", "data": writes},
                 ).execute()
                 if message_id:
                     self._processed_message_ids.add(message_id)
@@ -228,21 +344,22 @@ class SheetsHandler:
         if not self.service or not self.spreadsheet_id:
             return None
         try:
-            values = self.service.spreadsheets().values().get(
-                spreadsheetId=self.spreadsheet_id,
-                    range=f"'{self.get_sheet_by_month()}'!A:P",
-                ).execute().get("values", [])
+            values, header_idx, columns = self._read_sheet()
             summary = {"receita": 0.0, "despesa": 0.0, "investimento": 0.0, "saldo": 0.0}
-            for row in values[2:]:
-                if len(row) < 7 or row[2] != tipo_pj_pf:
+            for row in values[header_idx + 1:]:
+                if not str(self._get(row, columns, "date")).strip() or str(self._get(row, columns, "scope")).strip().upper() != tipo_pj_pf:
                     continue
-                value = self._parse_value(row[6])
-                movement = str(row[4]).strip().upper()
-                if movement in ("ENTRADA", "E", "RECEITA"):
+                value = self._parse_value(self._get(row, columns, "value"))
+                movement = str(self._get(row, columns, "movement_type")).strip().upper()
+                code = str(self._get(row, columns, "code")).strip()
+                category = self._normal_header(self._get(row, columns, "category"))
+                if code.startswith("7.") or "investimento" in category:
+                    summary["investimento"] += value
+                elif movement in ("E", "ENTRADA", "RECEITA"):
                     summary["receita"] += value
-                elif movement in ("SAÍDA", "SAIDA", "S", "DESPESA"):
+                elif movement in ("S", "SAÍDA", "SAIDA", "DESPESA"):
                     summary["despesa"] += value
-            summary["saldo"] = summary["receita"] - summary["despesa"]
+            summary["saldo"] = summary["receita"] - summary["despesa"] - summary["investimento"]
             return summary
         except Exception as error:
             print(f"[Google Sheets] erro ao obter resumo: {error}")
@@ -272,41 +389,40 @@ class SheetsHandler:
         return None
 
     def get_dashboard_data(self, month="", tipo="TODOS"):
-        """Consolida as abas mensais; não inclui Categorias nem Perfis."""
+        """Consolida os lançamentos da aba única, filtrando por período e escopo."""
         cache_key = (month or "todos", tipo or "TODOS")
         cached = self._dashboard_cache.get(cache_key)
         if cached and monotonic() - cached[0] < 30:
             return cached[1]
-        empty = {"months": [], "selected_month": month or "todos", "tipo": tipo, "metrics": {"receita": 0, "despesa": 0, "investimento": 0, "saldo": 0, "count": 0}, "by_category": [], "by_type": [], "recent": []}
+        empty = {"months": [self.get_sheet_by_month()], "selected_month": month or "todos", "tipo": tipo, "metrics": {"receita": 0, "despesa": 0, "investimento": 0, "saldo": 0, "count": 0}, "by_category": [], "by_type": [], "recent": []}
         if not self.service or not self.spreadsheet_id:
             return empty
         try:
-            metadata = self.service.spreadsheets().get(spreadsheetId=self.spreadsheet_id, fields="sheets.properties(title)").execute()
-            titles = [s.get("properties", {}).get("title", "") for s in metadata.get("sheets", [])]
-            excluded = {"categorias", "perfis"}
-            month_titles = [title for title in titles if title and title.casefold() not in excluded]
+            values, header_idx, columns = self._read_sheet()
             rows = []
-            read_titles = [title for title in month_titles if not month or month == "todos" or title.casefold() == month.casefold()]
-            ranges = [f"'{title}'!A:P" for title in read_titles]
-            batch = self.service.spreadsheets().values().batchGet(spreadsheetId=self.spreadsheet_id, ranges=ranges, majorDimension="ROWS").execute().get("valueRanges", [])
-            for title, value_range in zip(read_titles, batch):
-                values = value_range.get("values", [])
-                for row in values[2:]:
-                    if len(row) < 7:
+            for row in values[header_idx + 1:]:
+                date_text = str(self._get(row, columns, "date")).strip()
+                if not date_text:
+                    continue
+                row_date = self._parse_date(date_text)
+                row_type = str(self._get(row, columns, "scope")).strip().upper()
+                if row_type not in ("PF", "PJ") or (tipo in ("PF", "PJ") and row_type != tipo):
+                    continue
+                if month and month.casefold() not in ("todos", "all"):
+                    month_key = str(month).casefold()
+                    month_value = self._normal_header(self._get(row, columns, "month"))
+                    selected = month_value == month_key or bool(row_date and (row_date.strftime("%Y-%m") == month_key or str(row_date.month - 1) == month_key))
+                    if not selected:
                         continue
-                    row_date = self._parse_date(row[0])
-                    row_type = str(row[2]).strip().upper()
-                    if row_type not in ("PF", "PJ"):
-                        continue
-                    if tipo in ("PF", "PJ") and row_type != tipo:
-                        continue
-                    if month and month != "todos":
-                        selected_sheet = title.casefold() == month.casefold()
-                        selected_period = bool(row_date and row_date.strftime("%Y-%m") == month)
-                        if not selected_sheet and not selected_period:
-                            continue
-                    movement = "RECEITA" if str(row[4]).strip().upper() in ("E", "ENTRADA", "RECEITA", "RECEBIDO") else "DESPESA"
-                    rows.append({"date": row[0], "parsed_date": row_date, "type": row_type, "movement": movement, "category": row[3] if len(row) > 3 else "Sem categoria", "description": row[5] if len(row) > 5 else "", "value": self._parse_value(row[6] if len(row) > 6 else 0), "bank": row[7] if len(row) > 7 else "", "payment_method": row[8] if len(row) > 8 else "", "sheet": title})
+                code = str(self._get(row, columns, "code")).strip()
+                category = self._get(row, columns, "category", "Sem categoria") or "Sem categoria"
+                mtype = str(self._get(row, columns, "movement_type")).strip().upper()
+                movement = "INVESTIMENTO" if code.startswith("7.") else ("RECEITA" if mtype in ("E", "ENTRADA", "RECEITA") else "DESPESA")
+                rows.append({"date": date_text, "parsed_date": row_date, "type": row_type, "movement": movement,
+                             "category": category, "description": self._get(row, columns, "description"),
+                             "value": self._parse_value(self._get(row, columns, "value")),
+                             "bank": self._get(row, columns, "account"),
+                             "payment_method": self._get(row, columns, "payment"), "sheet": self.get_sheet_by_month()})
             metrics = {"receita": 0.0, "despesa": 0.0, "investimento": 0.0, "saldo": 0.0, "count": len(rows)}
             categories = {}
             types = {"PF": 0.0, "PJ": 0.0}
@@ -318,10 +434,12 @@ class SheetsHandler:
                     metrics["saldo"] += item["value"]
                 elif movement == "despesa":
                     metrics["saldo"] -= item["value"]
+                elif movement == "investimento":
+                    metrics["saldo"] -= item["value"]
                 categories[item["category"]] = categories.get(item["category"], 0.0) + item["value"]
                 types[item["type"]] += item["value"]
             rows.sort(key=lambda item: item["parsed_date"] or datetime.min, reverse=True)
-            result = {"months": month_titles, "selected_month": month or "todos", "tipo": tipo, "metrics": metrics, "by_category": [{"name": name, "value": value} for name, value in sorted(categories.items(), key=lambda pair: pair[1], reverse=True)[:10]], "by_type": [{"name": name, "value": value} for name, value in types.items()], "recent": [{key: item[key] for key in ("date", "type", "movement", "category", "description", "value", "sheet")} for item in rows[:12]]}
+            result = {"months": [self.get_sheet_by_month()], "selected_month": month or "todos", "tipo": tipo, "metrics": metrics, "by_category": [{"name": name, "value": value} for name, value in sorted(categories.items(), key=lambda pair: pair[1], reverse=True)[:10]], "by_type": [{"name": name, "value": value} for name, value in types.items()], "recent": [{key: item[key] for key in ("date", "type", "movement", "category", "description", "value", "sheet")} for item in rows[:12]]}
             self._dashboard_cache[cache_key] = (monotonic(), result)
             return result
         except Exception as error:
@@ -329,10 +447,28 @@ class SheetsHandler:
             return empty
 
     def get_categories(self):
-        """Lê a aba Categorias; usa o catálogo padrão se ela ainda não existir."""
+        """Lê as categorias PF/PJ liberadas na aba Config; mantém fallback legado."""
         if not self.service or not self.spreadsheet_id:
             return CATEGORIES
         try:
+            config = self._config_rows()
+            if len(config) > 2:
+                result = {"PF": {"RECEITA": [], "DESPESA": []}, "PJ": {"RECEITA": [], "DESPESA": []}, "GERAL": {"INVESTIMENTO": []}}
+                for scope, column in (("PJ", 18), ("PF", 20)):
+                    names = []
+                    for row in config[2:]:
+                        if len(row) > column and row[column].strip() and row[column].strip() not in names:
+                            names.append(row[column].strip())
+                    for name in names:
+                        code = self._category_code(name)
+                        if code.startswith("7."):
+                            result["GERAL"]["INVESTIMENTO"].append(name)
+                        elif code.startswith(("1", "5.01", "6.01", "9.01")):
+                            result[scope]["RECEITA"].append(name)
+                        else:
+                            result[scope]["DESPESA"].append(name)
+                if any(result[scope][kind] for scope in ("PF", "PJ") for kind in ("RECEITA", "DESPESA")):
+                    return result
             values = self.service.spreadsheets().values().get(
                 spreadsheetId=self.spreadsheet_id, range="'Categorias'!A:C"
             ).execute().get("values", [])
@@ -445,17 +581,25 @@ class SheetsHandler:
         if not self.service or not self.spreadsheet_id:
             return []
         try:
-            values = self.service.spreadsheets().values().get(spreadsheetId=self.spreadsheet_id, range=f"'{self.get_sheet_by_month()}'!A:P").execute().get("values", [])
+            values, header_idx, columns = self._read_sheet()
             found = []
-            for idx, row in enumerate(values[2:], start=3):
-                if len(row) < 7 or (tipo and row[2] != tipo):
+            for idx, row in enumerate(values[header_idx + 1:], start=header_idx + 2):
+                if not str(self._get(row, columns, "date")).strip():
+                    continue
+                scope = str(self._get(row, columns, "scope")).strip().upper()
+                if tipo and scope != tipo:
                     continue
                 haystack = " ".join(str(x) for x in row).casefold()
-                if phone_number and f"telefone: {phone_number}" not in haystack:
+                user = str(self._get(row, columns, "user"))
+                if phone_number and phone_number not in user:
                     continue
                 if keyword and keyword.casefold() not in haystack:
                     continue
-                found.append({"row": idx, "date": row[0], "type": row[2], "movement": row[4], "category": row[3], "description": row[5], "value": row[6]})
+                found.append({"row": idx, "date": self._get(row, columns, "date"), "type": scope,
+                              "movement": self._get(row, columns, "movement_type"),
+                              "category": self._get(row, columns, "category"),
+                              "description": self._get(row, columns, "description"),
+                              "value": self._get(row, columns, "value")})
                 if len(found) >= limit:
                     break
             return found
@@ -467,7 +611,15 @@ class SheetsHandler:
         if not self.service or not self.spreadsheet_id:
             return False
         try:
-            self.service.spreadsheets().values().clear(spreadsheetId=self.spreadsheet_id, range=f"'{self.get_sheet_by_month()}'!A{row_number}:P{row_number}").execute()
+            _, _, columns = self._read_sheet()
+            fields = ("date", "month", "year", "scope", "category", "code", "movement_type", "description", "value", "account", "payment", "status", "goal", "user", "id")
+            data = [{"range": f"'{self.get_sheet_by_month()}'!{self._column_letter(columns[field])}{row_number}", "values": [[""]]}
+                    for field in fields if field in columns]
+            self.service.spreadsheets().values().batchUpdate(
+                spreadsheetId=self.spreadsheet_id,
+                body={"valueInputOption": "USER_ENTERED", "data": data},
+            ).execute()
+            self._dashboard_cache.clear()
             return True
         except Exception as error:
             print(f"[Google Sheets] erro ao apagar transação: {error}")
@@ -477,16 +629,18 @@ class SheetsHandler:
         if not self.service or not self.spreadsheet_id:
             return False
         try:
-            row = self.service.spreadsheets().values().get(spreadsheetId=self.spreadsheet_id, range=f"'{self.get_sheet_by_month()}'!A{row_number}:P{row_number}").execute().get("values", [[]])[0]
-            while len(row) < 16:
-                row.append("")
-            if value is not None:
-                row[6] = float(value)
-            if category:
-                row[3] = category
-            if description:
-                row[5] = description
-            self.service.spreadsheets().values().update(spreadsheetId=self.spreadsheet_id, range=f"'{self.get_sheet_by_month()}'!A{row_number}:P{row_number}", valueInputOption="USER_ENTERED", body={"values": [row]}).execute()
+            _, _, columns = self._read_sheet()
+            writes = []
+            for field, new_value in (("value", float(value) if value is not None else None),
+                                     ("description", description), ("category", category)):
+                if new_value is not None and field in columns:
+                    writes.append({"range": f"'{self.get_sheet_by_month()}'!{self._column_letter(columns[field])}{row_number}", "values": [[new_value]]})
+            if category and "code" in columns:
+                writes.append({"range": f"'{self.get_sheet_by_month()}'!{self._column_letter(columns['code'])}{row_number}", "values": [[self._category_code(category)]]})
+            if writes:
+                self.service.spreadsheets().values().batchUpdate(spreadsheetId=self.spreadsheet_id,
+                    body={"valueInputOption": "USER_ENTERED", "data": writes}).execute()
+            self._dashboard_cache.clear()
             return True
         except Exception as error:
             print(f"[Google Sheets] erro ao atualizar transação: {error}")

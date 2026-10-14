@@ -1,5 +1,6 @@
 import os
 import re
+import unicodedata
 from datetime import datetime
 
 import requests
@@ -42,12 +43,27 @@ class WhatsAppHandler:
 
     @staticmethod
     def _extract_amount(text):
-        match = re.search(r"(?<!\w)(?:r\$\s*)?\d{1,3}(?:\.\d{3})*(?:,\d{1,2})?|(?:r\$\s*)?\d+(?:[\.,]\d{1,2})?(?!\w)", text, flags=re.I)
-        if not match:
+        # Prefere agrupamentos completos (2.000,00) e não deixa a primeira
+        # alternativa truncar inteiros de quatro ou mais dígitos (2000 -> 200).
+        pattern = re.compile(r"(?<!\w)(?:r\$\s*)?((?:\d{1,3}(?:\.\d{3})+|\d+)(?:[.,]\d{1,2})?)(?!\w)", flags=re.I)
+        matches = list(pattern.finditer(text))
+        if not matches:
             return None, text
-        raw = match.group(0).lower().replace("r$", "").replace(" ", "")
+        date_spans = [m.span() for m in re.finditer(r"\b\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?\b", text)]
+        date_spans += [m.span() for m in re.finditer(
+            r"\b(?:dia\s+)?\d{1,2}\s+de\s+(?:janeiro|fevereiro|março|marco|abril|maio|junho|julho|agosto|setembro|outubro|novembro|dezembro)(?:\s+de\s+\d{4})?\b",
+            text, flags=re.I)]
+        not_date = [m for m in matches if not any(m.start() < end and m.end() > start for start, end in date_spans)]
+        currency_matches = [m for m in matches if re.match(r"r\$\s*", text[m.start():m.end()], flags=re.I)]
+        match = (currency_matches or not_date or matches)[0]
+        raw = match.group(1).replace(" ", "")
         try:
-            value = float(raw.replace(".", "").replace(",", ".")) if "," in raw or re.fullmatch(r"\d{1,3}(?:\.\d{3})+", raw) else float(raw)
+            if "," in raw:
+                value = float(raw.replace(".", "").replace(",", "."))
+            elif re.fullmatch(r"\d{1,3}(?:\.\d{3})+", raw):
+                value = float(raw.replace(".", ""))
+            else:
+                value = float(raw)
         except ValueError:
             return None, text
         return value, (text[:match.start()] + " " + text[match.end():]).strip()
@@ -71,7 +87,13 @@ class WhatsAppHandler:
             descricao = re.sub(r"r\$|\b(pf|pj|pessoal|empresa|receita|despesa|investimento|recebi|entrou|gastei|paguei|comprei|ganhei|investi|de|no|na|em)\b", " ", without_value, flags=re.I)
             descricao = re.sub(r"\s+", " ", descricao).strip(" -:,.\"") or "Sem descrição"
             source = (categories or CATEGORIES).get("GERAL", {}).get("INVESTIMENTO", []) if tipo_movimento == "INVESTIMENTO" else (categories or CATEGORIES).get(tipo_pj_pf, {}).get(tipo_movimento, [])
-            categoria = next((cat for cat in source if cat.casefold() in descricao.casefold()), "Outro")
+            def normalized(value):
+                value = unicodedata.normalize("NFD", str(value or "").casefold())
+                value = "".join(ch for ch in value if unicodedata.category(ch) != "Mn")
+                return re.sub(r"[^a-z0-9]+", " ", value).strip()
+            normalized_message = normalized(original)
+            categoria = next((cat for cat in sorted(source, key=len, reverse=True)
+                              if normalized(cat) and f" {normalized(cat)} " in f" {normalized_message} "), "Outro")
             return tipo_pj_pf, tipo_movimento, categoria, valor, descricao, None
         except Exception as error:
             return None, None, None, None, None, f"❌ Erro ao processar: {error}"
