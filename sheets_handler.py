@@ -34,7 +34,6 @@ class SheetsHandler:
                 return False
             self.service = discovery.build("sheets", "v4", credentials=self.credentials, cache_discovery=False)
             self._migrate_monthly_sheets()
-            self._sync_cashflow_tabs_from_august()
             return True
         except Exception as error:
             print(f"[Google Sheets] erro de autenticação: {error}")
@@ -137,6 +136,8 @@ class SheetsHandler:
             if format_requests:
                 self.service.spreadsheets().batchUpdate(spreadsheetId=self.spreadsheet_id, body={"requests": format_requests}).execute()
 
+            formula_r1c1 = '=IF(R[0]C[-4]="","",IF(LOWER(R[0]C[-1])="pago",IF(ROW()=4,R1C2,R[-1]C)-R[0]C[-4],IF(LOWER(R[0]C[-1])="recebido",IF(ROW()=4,R1C2,R[-1]C)+R[0]C[-4],IF(ROW()=4,R1C2,R[-1]C))))'
+            formula_requests = []
             for index, month in enumerate(months):
                 if month not in sheet_map:
                     continue
@@ -147,21 +148,19 @@ class SheetsHandler:
                     valueInputOption="USER_ENTERED",
                     body={"values": [["Saldo inicial:", f'=IFERROR(LOOKUP(2,1/(\'{previous}\'!J:J<>""),\'{previous}\'!J:J),0)']]},
                 ).execute()
-                formulas = []
-                for row_number in range(4, 1001):
-                    if row_number == 4:
-                        formula = f'=IF(F{row_number}="","",IF(LOWER(I{row_number})="pago",$B$1-F{row_number},IF(LOWER(I{row_number})="recebido",$B$1+F{row_number},$B$1)))'
-                    else:
-                        formula = f'=IF(F{row_number}="","",IF(LOWER(I{row_number})="pago",J{row_number - 1}-F{row_number},IF(LOWER(I{row_number})="recebido",J{row_number - 1}+F{row_number},J{row_number - 1})))'
-                    formulas.append([formula])
-                self.service.spreadsheets().values().update(
-                    spreadsheetId=self.spreadsheet_id,
-                    range=f"'{month}'!J4:J1000",
-                    valueInputOption="USER_ENTERED",
-                    body={"values": formulas},
-                ).execute()
+                formula_requests.append({"repeatCell": {
+                    "range": {"sheetId": sheet_map[month], "startRowIndex": 3, "endRowIndex": 1000, "startColumnIndex": 9, "endColumnIndex": 10},
+                    "cell": {"userEnteredValue": {"formulaR1C1": formula_r1c1}},
+                    "fields": "userEnteredValue.formulaR1C1",
+                }})
+            if formula_requests:
+                self.service.spreadsheets().batchUpdate(spreadsheetId=self.spreadsheet_id, body={"requests": formula_requests}).execute()
         except Exception as error:
             print(f"[Google Sheets] sincronização de abas não concluída: {error}")
+
+    def sync_cashflow_tabs_from_august(self):
+        """Executa explicitamente a sincronização pesada, fora do boot do servidor."""
+        return self._sync_cashflow_tabs_from_august()
 
     def get_sheet_by_month(self):
         configured_name = os.getenv("SHEET_NAME", "").strip()

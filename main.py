@@ -27,11 +27,13 @@ gemini = GeminiHandler()
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "")
 APP_SECRET = os.getenv("APP_SECRET", "")
 DASHBOARD_TOKEN = os.getenv("DASHBOARD_TOKEN", "").strip()
+LAYOUT_SYNC_TOKEN = os.getenv("LAYOUT_SYNC_TOKEN", "").strip()
 pending_deletions = {}
 pending_media = {}
 pending_ai = {}
 received_message_ids = set()
 received_message_lock = Lock()
+layout_sync_status = {"state": "idle"}
 
 
 def is_valid_signature() -> bool:
@@ -329,6 +331,29 @@ def dashboard_api():
     if tipo not in ("TODOS", "PF", "PJ"):
         tipo = "TODOS"
     return jsonify(sheets.get_dashboard_data(month=month, tipo=tipo))
+
+
+@app.route("/api/admin/sync-layout", methods=["GET", "POST"])
+def sync_layout_api():
+    token = request.headers.get("X-Layout-Sync-Token", "")
+    if not LAYOUT_SYNC_TOKEN or not hmac.compare_digest(token, LAYOUT_SYNC_TOKEN):
+        return jsonify({"error": "Não autorizado."}), 401
+    if request.method == "GET":
+        return jsonify(layout_sync_status)
+    if layout_sync_status["state"] == "running":
+        return jsonify(layout_sync_status), 202
+
+    def run_sync():
+        layout_sync_status.update({"state": "running"})
+        try:
+            sheets.sync_cashflow_tabs_from_august()
+            layout_sync_status.update({"state": "completed"})
+        except Exception as error:
+            print(f"[Layout] erro na sincronização: {error}")
+            layout_sync_status.update({"state": "failed"})
+
+    Thread(target=run_sync, daemon=True).start()
+    return jsonify({"state": "running"}), 202
 
 
 if __name__ == "__main__":
