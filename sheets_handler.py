@@ -1,5 +1,9 @@
+import hashlib
 import json
 import os
+import re
+import secrets
+import unicodedata
 from datetime import datetime
 from threading import Lock
 from time import monotonic
@@ -12,6 +16,7 @@ SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 NEW_SPREADSHEET_ID = "1zGh1L0cYQ6nRN-ZkEfXzQvgTxSHZhWSu07ss3I5tHjQ"
 MONTHS_PT = ["janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"]
+STATUS_OPTIONS = ("Recebido", "A receber", "Pago", "A pagar")
 HEADER_ALIASES = {
     "date": ("data",), "month": ("mês", "mes"), "year": ("ano",),
     "scope": ("escopo",), "category": ("categoria",), "code": ("código", "codigo"),
@@ -209,6 +214,26 @@ class SheetsHandler:
             label = chr(65 + rem) + label
         return label
 
+    @staticmethod
+    def _normalize_option(value):
+        text = unicodedata.normalize("NFD", str(value or "").casefold())
+        text = "".join(char for char in text if unicodedata.category(char) != "Mn")
+        return re.sub(r"[^a-z0-9]+", " ", text).strip()
+
+    @classmethod
+    def match_option(cls, value, options):
+        key = cls._normalize_option(value)
+        if not key:
+            return None
+        return next((option for option in options if cls._normalize_option(option) == key), None)
+
+    @staticmethod
+    def _short_numeric_id(message_id=""):
+        if message_id:
+            digest = hashlib.sha256(str(message_id).encode("utf-8")).digest()
+            return 100_000_000_000 + int.from_bytes(digest[:8], "big") % 900_000_000_000
+        return secrets.randbelow(900_000_000_000) + 100_000_000_000
+
     def _next_transaction_row(self, values, header_idx, columns):
         """Choose the row after the last real transaction, ignoring formulas and metadata."""
         occupied_fields = ("date", "scope", "category", "description", "value",
@@ -240,33 +265,47 @@ class SheetsHandler:
         return ""
 
     def _resolve_category(self, category, scope, movement):
-        """Garante que a categoria gravada exista na lista PF/PJ da aba Config."""
-        column = 18 if str(scope).upper() == "PJ" else 20
-        options = self._config_options(column)
-        by_key = {self._normal_header(option): option for option in options}
-        key = self._normal_header(category)
-        if key in by_key:
-            return by_key[key]
-        if not options:
-            return category or "Outro"
-        move = str(movement).upper()
-        candidates = []
-        for option in options:
-            name = self._normal_header(option)
-            code = self._category_code(option)
-            if move == "RECEITA" and ("outras receitas" in name or name.startswith("receita ")):
-                candidates.append(option)
-            elif move == "INVESTIMENTO" and (code.startswith("7.") or "investimento" in name):
-                candidates.append(option)
-            elif move != "RECEITA" and move != "INVESTIMENTO" and "outros" in name and not any(x in name for x in ("imposto", "financeiro")):
-                candidates.append(option)
-        return candidates[0] if candidates else options[0]
+        """Accept only a category that exists in the data-validation list for column E."""
+        options = self.get_category_options()
+        return self.match_option(category, options) if options else (category or "Outro")
 
     def _config_options(self, column_index):
         return [str(row[column_index]).strip() for row in self._config_rows()[2:]
                 if len(row) > column_index and str(row[column_index]).strip()]
 
-    def add_transaction(self, tipo_pj_pf, tipo_movimento, categoria, descricao, valor, phone_number="", contact_name="", message_id="", raw_message="", transaction_date=None, bank="", payment_method=""):
+    def get_category_options(self):
+        options = self._config_options(16)  # Config!Q, validação da coluna E.
+        if options:
+            return list(dict.fromkeys(options))
+        categories = self.get_categories()
+        return list(dict.fromkeys(
+            name for scope in categories.values() for group in scope.values() for name in group
+        ))
+
+    def get_meta_options(self):
+        if not self.service or not self.spreadsheet_id:
+            return []
+        try:
+            values = self.service.spreadsheets().values().get(
+                spreadsheetId=self.spreadsheet_id,
+                range="'Metas e Limites'!G3:G42",
+            ).execute().get("values", [])
+            return list(dict.fromkeys(
+                str(row[0]).strip() for row in values if row and str(row[0]).strip()
+            ))
+        except Exception as error:
+            print(f"[Google Sheets] erro ao ler metas disponíveis: {error}")
+            return []
+
+    def get_transaction_options(self):
+        return {
+            "categories": self.get_category_options(),
+            "accounts": self._config_options(6),  # Config!G, validação da coluna J.
+            "goals": self.get_meta_options(),
+            "statuses": list(STATUS_OPTIONS),
+        }
+
+    def add_transaction(self, tipo_pj_pf, tipo_movimento, categoria, descricao, valor, phone_number="", contact_name="", message_id="", raw_message="", transaction_date=None, bank="", payment_method="", account="", meta="", status=""):
         if not self.service or not self.spreadsheet_id:
             return False, "❌ Google Sheets não está configurado no Render."
         try:
@@ -278,7 +317,8 @@ class SheetsHandler:
                 required = ("date", "scope", "category", "movement_type", "description", "value", "status", "id")
                 if any(field not in columns for field in required):
                     return False, "❌ Os cabeçalhos da aba Lançamentos não correspondem ao modelo esperado."
-                if message_id and any(str(self._get(existing, columns, "id")).strip() == str(message_id) for existing in values[header_idx + 1:]):
+                numeric_id = self._short_numeric_id(message_id)
+                if message_id and any(str(self._get(existing, columns, "id")).strip() in (str(message_id), str(numeric_id)) for existing in values[header_idx + 1:]):
                     self._processed_message_ids.add(message_id)
                     return True, "✅ Esta mensagem já foi processada; não registrei novamente."
 
@@ -289,17 +329,30 @@ class SheetsHandler:
                     date_value = self._parse_date(transaction_date) or datetime.now()
                 movement = str(tipo_movimento or "DESPESA").strip().upper()
                 is_income = movement in ("RECEITA", "ENTRADA", "E")
-                status = "Recebido" if is_income else "Pago"
+                valid_statuses = ("Recebido", "A receber") if is_income else ("Pago", "A pagar")
+                if status:
+                    status = self.match_option(status, valid_statuses)
+                    if not status:
+                        return False, "❌ O Status precisa ser uma opção válida da planilha."
+                else:
+                    status = "Recebido" if is_income else "Pago"
 
                 account_options = self._config_options(6)
                 payment_options = self._config_options(4)
-                account = ""
+                account = self.match_option(account, account_options) if account_options else account
                 bank_key = self._normal_header(bank)
-                if bank_key:
+                if not account and bank_key:
                     possible = [option for option in account_options if bank_key in self._normal_header(option)]
                     if possible:
                         scope_hint = "empresas" if str(tipo_pj_pf).upper() == "PJ" else "pessoal"
                         account = next((x for x in possible if scope_hint in self._normal_header(x)), possible[0])
+                if account_options and not account:
+                    return False, "❌ Não consegui associar uma Conta válida do menu da planilha."
+                meta_options = self.get_meta_options()
+                if meta:
+                    meta = self.match_option(meta, meta_options) if meta_options else ""
+                    if not meta:
+                        return False, "❌ A Meta informada não corresponde às opções da planilha."
                 payment = ""
                 method_key = self._normal_header(payment_method)
                 payment_matches = []
@@ -307,24 +360,27 @@ class SheetsHandler:
                     payment_matches = [option for option in payment_options if method_key in self._normal_header(option)]
                     if account:
                         payment = next((x for x in payment_matches if self._normal_header(account) in self._normal_header(x)), "")
-                    payment = payment or (payment_matches[0] if payment_matches else payment_method)
+                    payment = payment or (payment_matches[0] if payment_matches else "")
                 categoria = self._resolve_category(categoria, tipo_pj_pf, movement)
+                if not categoria:
+                    return False, "❌ A Categoria informada não corresponde às opções da planilha."
 
-                # B/C/F/G/O são calculadas por fórmulas; M é checkbox e N é meta opcional.
-                # Nenhuma dessas colunas deve deslocar o append nem receber valores do bot.
+                # B/C/F/G/O são calculadas por fórmulas; M é checkbox. N é o campo Meta.
+                # Fórmulas/checkbox não deslocam o append nem recebem valores do bot.
                 next_row = self._next_transaction_row(values, header_idx, columns)
                 user_value = f"{contact_name} ({phone_number})" if contact_name and phone_number else (contact_name or phone_number)
                 row_values = {
                     "date": date_value.strftime("%d/%m/%Y"),
                     "scope": str(tipo_pj_pf).upper(),
                     "category": categoria,
-                    "description": descricao,
+                    "description": str(raw_message or descricao).strip(),
                     "value": float(valor),
                     "account": account,
                     "payment": payment,
                     "status": status,
+                    "goal": meta,
                     "user": user_value,
-                    "id": message_id,
+                    "id": numeric_id,
                 }
                 writes = [{"range": f"'{sheet_name}'!{self._column_letter(columns[field])}{next_row}", "values": [[value]]}
                           for field, value in row_values.items() if field in columns]
@@ -335,7 +391,9 @@ class SheetsHandler:
                 if message_id:
                     self._processed_message_ids.add(message_id)
             self._dashboard_cache.clear()
-            return True, f"✅ Transação registrada na aba '{sheet_name}' em {date_value.strftime('%d/%m/%Y')}."
+            movement_label = "investimento" if movement == "INVESTIMENTO" else ("receita" if is_income else "despesa")
+            return True, (f"✅ Anotado: {movement_label} de R$ {float(valor):.2f} em {date_value.strftime('%d/%m/%Y')}\n"
+                          f"Categoria: {categoria} · Conta: {account} · Meta: {meta or 'sem meta'} · Status: {status}.")
         except Exception as error:
             print(f"[Google Sheets] erro ao adicionar transação: {error}")
             return False, "❌ Não consegui salvar na planilha. Verifique o acesso da conta de serviço."

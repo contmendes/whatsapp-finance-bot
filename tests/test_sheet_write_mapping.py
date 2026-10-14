@@ -92,7 +92,7 @@ class SheetWriteMappingTests(unittest.TestCase):
         columns = handler._header_map(HEADERS)
         self.assertEqual(handler._next_transaction_row(rows, 0, columns), 3)
 
-    def test_append_follows_last_transaction_and_only_writes_input_columns(self):
+    def test_append_writes_only_input_columns_and_validates_user_choices(self):
         rows = [HEADERS.copy(), existing_transaction("old-message")]
         for _ in range(3, 51):
             row = blank_row()
@@ -113,14 +113,21 @@ class SheetWriteMappingTests(unittest.TestCase):
         handler._processed_message_ids = set()
         handler._config_cache = None
         handler._config_cache_time = 0
-        handler._config_options = lambda column_index: []
-        handler._resolve_category = lambda category, scope, movement: category
+        handler._config_options = lambda column_index: {
+            4: ["Pix", "Cartão de crédito"],
+            6: ["Conta PF", "Conta PJ"],
+        }.get(column_index, [])
+        handler.get_category_options = lambda: ["Mercado", "Transporte"]
+        handler.get_meta_options = lambda: ["Meta existente", "Meta nova"]
 
+        original_message = "Paguei R$ 42,50 no mercado com minha conta PF"
         with patch.dict("os.environ", {"SHEET_NAME": "Lançamentos"}):
             success, _ = handler.add_transaction(
-                "PF", "DESPESA", "Mercado", "Compra nova", 42.50,
+                "PF", "DESPESA", "Mercado", "descrição curta", 42.50,
                 phone_number="5511999999999", contact_name="Contato",
-                message_id="new-message",
+                message_id="new-message", raw_message=original_message,
+                account="Conta PF", meta="Meta existente", status="Pago",
+                payment_method="Pix",
             )
 
         self.assertTrue(success)
@@ -130,8 +137,33 @@ class SheetWriteMappingTests(unittest.TestCase):
         self.assertTrue(writes)
         self.assertTrue(all(entry["range"].endswith("54") for entry in writes))
         written_columns = {column_from_range(entry["range"]) for entry in writes}
-        self.assertEqual(written_columns, {"A", "D", "E", "H", "I", "J", "K", "L", "P", "Q"})
-        self.assertTrue(written_columns.isdisjoint({"B", "C", "F", "G", "M", "N", "O"}))
+        self.assertEqual(written_columns, {"A", "D", "E", "H", "I", "J", "K", "L", "N", "P", "Q"})
+        self.assertTrue(written_columns.isdisjoint({"B", "C", "F", "G", "M", "O"}))
+        cells = {column_from_range(entry["range"]): entry["values"][0][0] for entry in writes}
+        self.assertEqual(cells["H"], original_message)
+        self.assertEqual(cells["J"], "Conta PF")
+        self.assertEqual(cells["L"], "Pago")
+        self.assertEqual(cells["N"], "Meta existente")
+        self.assertIsInstance(cells["Q"], int)
+        self.assertRegex(str(cells["Q"]), r"^\d{12}$")
+
+        with patch.dict("os.environ", {"SHEET_NAME": "Lançamentos"}):
+            invalid_success, invalid_message = handler.add_transaction(
+                "PF", "DESPESA", "Mercado", "Compra", 12,
+                message_id="wrong-status", raw_message="gastei 12",
+                account="Conta PF", meta="Meta existente", status="Recebido",
+            )
+        self.assertFalse(invalid_success)
+        self.assertIn("Status", invalid_message)
+
+    def test_numeric_message_id_is_short_and_repeatable(self):
+        first = SheetsHandler._short_numeric_id("wamid.example-message")
+        second = SheetsHandler._short_numeric_id("wamid.example-message")
+        self.assertEqual(first, second)
+        self.assertRegex(str(first), r"^\d{12}$")
+
+    def test_option_matching_ignores_accents_and_case(self):
+        self.assertEqual(SheetsHandler.match_option("cartao de credito", ["Cartão de crédito"]), "Cartão de crédito")
 
 
 if __name__ == "__main__":
