@@ -117,19 +117,16 @@ class SheetsHandler:
                         "source": {"sheetId": sheet_map["Agosto"], "startRowIndex": 0, "endRowIndex": 1000, "startColumnIndex": 0, "endColumnIndex": 16},
                         "destination": {"sheetId": sheet_map[month], "startRowIndex": 0, "endRowIndex": 1000, "startColumnIndex": 0, "endColumnIndex": 16},
                         "pasteType": "PASTE_FORMAT",
-                        "transposed": False,
                     }})
                     format_requests.append({"copyPaste": {
                         "source": {"sheetId": sheet_map["Agosto"], "startRowIndex": 0, "endRowIndex": 2, "startColumnIndex": 0, "endColumnIndex": 16},
                         "destination": {"sheetId": sheet_map[month], "startRowIndex": 0, "endRowIndex": 2, "startColumnIndex": 0, "endColumnIndex": 16},
                         "pasteType": "PASTE_NORMAL",
-                        "transposed": False,
                     }})
                     format_requests.append({"copyPaste": {
                         "source": {"sheetId": sheet_map["Agosto"], "startRowIndex": 2, "endRowIndex": 1000, "startColumnIndex": 0, "endColumnIndex": 16},
                         "destination": {"sheetId": sheet_map[month], "startRowIndex": 2, "endRowIndex": 1000, "startColumnIndex": 0, "endColumnIndex": 16},
                         "pasteType": "PASTE_DATA_VALIDATION",
-                        "transposed": False,
                     }})
             if format_requests:
                 self.service.spreadsheets().batchUpdate(spreadsheetId=self.spreadsheet_id, body={"requests": format_requests}).execute()
