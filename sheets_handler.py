@@ -209,6 +209,16 @@ class SheetsHandler:
             label = chr(65 + rem) + label
         return label
 
+    def _next_transaction_row(self, values, header_idx, columns):
+        """Choose the row after the last real transaction, ignoring formulas and metadata."""
+        occupied_fields = ("date", "scope", "category", "description", "value",
+                           "account", "payment", "status", "user", "id")
+        last_data_row = header_idx + 1
+        for sheet_row, existing in enumerate(values[header_idx + 1:], start=header_idx + 2):
+            if any(str(self._get(existing, columns, field)).strip() for field in occupied_fields):
+                last_data_row = sheet_row
+        return last_data_row + 1
+
     def _config_rows(self):
         if self._config_cache is not None and monotonic() - self._config_cache_time < 60:
             return self._config_cache
@@ -292,37 +302,27 @@ class SheetsHandler:
                         account = next((x for x in possible if scope_hint in self._normal_header(x)), possible[0])
                 payment = ""
                 method_key = self._normal_header(payment_method)
+                payment_matches = []
                 if method_key:
-                    possible = [option for option in payment_options if method_key in self._normal_header(option)]
+                    payment_matches = [option for option in payment_options if method_key in self._normal_header(option)]
                     if account:
-                        payment = next((x for x in possible if self._normal_header(account) in self._normal_header(x)), "")
-                    payment = payment or (possible[0] if possible else payment_method)
+                        payment = next((x for x in payment_matches if self._normal_header(account) in self._normal_header(x)), "")
+                    payment = payment or (payment_matches[0] if payment_matches else payment_method)
                 categoria = self._resolve_category(categoria, tipo_pj_pf, movement)
-                category_code = self._category_code(categoria)
 
-                # A aba possui cabeçalho na linha 1 e dados a partir da linha 2.
-                # Ignoramos M (checkbox) e O (saldo calculado) para preservar controles/fórmulas.
-                occupied = ("date", "month", "year", "scope", "category", "code", "movement_type", "description", "value", "account", "payment", "status", "goal", "user", "id")
-                last_data_row = header_idx + 1
-                for offset, existing in enumerate(values[header_idx + 1:], start=header_idx + 2):
-                    if any(str(self._get(existing, columns, field)).strip() for field in occupied):
-                        last_data_row = offset
-                next_row = last_data_row + 1
+                # B/C/F/G/O são calculadas por fórmulas; M é checkbox e N é meta opcional.
+                # Nenhuma dessas colunas deve deslocar o append nem receber valores do bot.
+                next_row = self._next_transaction_row(values, header_idx, columns)
                 user_value = f"{contact_name} ({phone_number})" if contact_name and phone_number else (contact_name or phone_number)
                 row_values = {
                     "date": date_value.strftime("%d/%m/%Y"),
-                    "month": MONTHS_PT[date_value.month - 1],
-                    "year": date_value.year,
                     "scope": str(tipo_pj_pf).upper(),
                     "category": categoria,
-                    "code": category_code,
-                    "movement_type": "E" if is_income else "S",
                     "description": descricao,
                     "value": float(valor),
                     "account": account,
                     "payment": payment,
                     "status": status,
-                    "goal": "",
                     "user": user_value,
                     "id": message_id,
                 }
