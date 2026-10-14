@@ -114,46 +114,33 @@ class SheetsHandler:
                     continue
                 if month != "Agosto":
                     format_requests.append({"copyPaste": {
-                        "source": {"sheetId": sheet_map["Agosto"], "startRowIndex": 0, "endRowIndex": 1000, "startColumnIndex": 0, "endColumnIndex": 15},
-                        "destination": {"sheetId": sheet_map[month], "startRowIndex": 0, "endRowIndex": 1000, "startColumnIndex": 0, "endColumnIndex": 15},
+                        "source": {"sheetId": sheet_map["Agosto"], "startRowIndex": 0, "endRowIndex": 1000, "startColumnIndex": 0, "endColumnIndex": 16},
+                        "destination": {"sheetId": sheet_map[month], "startRowIndex": 0, "endRowIndex": 1000, "startColumnIndex": 0, "endColumnIndex": 16},
                         "pasteType": "PASTE_FORMAT",
                         "transposed": False,
                     }})
-                    for start_column, end_column in ((0, 1), (1, 2), (2, 15)):
-                        format_requests.append({"copyPaste": {
-                            "source": {"sheetId": sheet_map["Agosto"], "startRowIndex": 0 if start_column != 1 else 1, "endRowIndex": 3, "startColumnIndex": start_column, "endColumnIndex": end_column},
-                            "destination": {"sheetId": sheet_map[month], "startRowIndex": 0 if start_column != 1 else 1, "endRowIndex": 3, "startColumnIndex": start_column, "endColumnIndex": end_column},
-                            "pasteType": "PASTE_NORMAL",
-                            "transposed": False,
-                        }})
                     format_requests.append({"copyPaste": {
-                        "source": {"sheetId": sheet_map["Agosto"], "startRowIndex": 2, "endRowIndex": 1000, "startColumnIndex": 0, "endColumnIndex": 15},
-                        "destination": {"sheetId": sheet_map[month], "startRowIndex": 2, "endRowIndex": 1000, "startColumnIndex": 0, "endColumnIndex": 15},
+                        "source": {"sheetId": sheet_map["Agosto"], "startRowIndex": 0, "endRowIndex": 2, "startColumnIndex": 0, "endColumnIndex": 16},
+                        "destination": {"sheetId": sheet_map[month], "startRowIndex": 0, "endRowIndex": 2, "startColumnIndex": 0, "endColumnIndex": 16},
+                        "pasteType": "PASTE_NORMAL",
+                        "transposed": False,
+                    }})
+                    format_requests.append({"copyPaste": {
+                        "source": {"sheetId": sheet_map["Agosto"], "startRowIndex": 2, "endRowIndex": 1000, "startColumnIndex": 0, "endColumnIndex": 16},
+                        "destination": {"sheetId": sheet_map[month], "startRowIndex": 2, "endRowIndex": 1000, "startColumnIndex": 0, "endColumnIndex": 16},
                         "pasteType": "PASTE_DATA_VALIDATION",
                         "transposed": False,
                     }})
             if format_requests:
                 self.service.spreadsheets().batchUpdate(spreadsheetId=self.spreadsheet_id, body={"requests": format_requests}).execute()
 
-            formula_r1c1 = '=IF(R[0]C[-4]="","",IF(LOWER(R[0]C[-1])="pago",IF(ROW()=4,R1C2,R[-1]C)-R[0]C[-4],IF(LOWER(R[0]C[-1])="recebido",IF(ROW()=4,R1C2,R[-1]C)+R[0]C[-4],IF(ROW()=4,R1C2,R[-1]C))))'
-            formula_requests = []
             for index, month in enumerate(months):
                 if month not in sheet_map:
                     continue
-                previous = months[index - 1] if index else months[-1]
-                self.service.spreadsheets().values().update(
-                    spreadsheetId=self.spreadsheet_id,
-                    range=f"'{month}'!A1:B1",
-                    valueInputOption="USER_ENTERED",
-                    body={"values": [["Saldo inicial:", f'=IFERROR(LOOKUP(2,1/(\'{previous}\'!J:J<>""),\'{previous}\'!J:J),0)']]},
-                ).execute()
-                formula_requests.append({"repeatCell": {
-                    "range": {"sheetId": sheet_map[month], "startRowIndex": 3, "endRowIndex": 1000, "startColumnIndex": 9, "endColumnIndex": 10},
-                    "cell": {"userEnteredValue": {"formulaR1C1": formula_r1c1}},
-                    "fields": "userEnteredValue.formulaR1C1",
-                }})
-            if formula_requests:
-                self.service.spreadsheets().batchUpdate(spreadsheetId=self.spreadsheet_id, body={"requests": formula_requests}).execute()
+                if month != "Agosto":
+                    self.service.spreadsheets().values().clear(
+                        spreadsheetId=self.spreadsheet_id, range=f"'{month}'!A3:P1000"
+                    ).execute()
         except Exception as error:
             print(f"[Google Sheets] sincronização de abas não concluída: {error}")
 
@@ -192,19 +179,19 @@ class SheetsHandler:
                 except ValueError:
                     date_value = datetime.now()
                 values = self.service.spreadsheets().values().get(
-                    spreadsheetId=self.spreadsheet_id, range=f"'{sheet_name}'!A:O"
+                    spreadsheetId=self.spreadsheet_id, range=f"'{sheet_name}'!A:P"
                 ).execute().get("values", [])
-                if message_id and any(len(existing) > 13 and str(existing[13]).strip() == str(message_id) for existing in values[3:]):
+                if message_id and any(len(existing) > 14 and str(existing[14]).strip() == str(message_id) for existing in values[2:]):
                     self._processed_message_ids.add(message_id)
                     return True, "✅ Esta mensagem já foi processada; não registrei novamente."
                 movement_type = "Entrada" if tipo_movimento.upper() == "RECEITA" else "Saída"
                 status = "Recebido" if movement_type == "Entrada" else "Pago"
-                next_row = max(4, len(values) + 1)
+                next_row = max(3, len(values) + 1)
                 row = [
                     date_value.strftime("%d/%m/%Y %H:%M:%S"),
+                    datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
                     tipo_pj_pf,
                     categoria,
-                    "",
                     movement_type,
                     descricao,
                     float(valor),
@@ -217,18 +204,18 @@ class SheetsHandler:
                     message_id,
                     "",
                 ]
-                range_name = f"'{sheet_name}'!A{next_row}:O{next_row}"
                 self.service.spreadsheets().values().append(
                     spreadsheetId=self.spreadsheet_id,
-                    range=f"'{sheet_name}'!A:O",
+                    range=f"'{sheet_name}'!A:P",
                     valueInputOption="USER_ENTERED",
                     insertDataOption="INSERT_ROWS",
                     body={"values": [row]},
                 ).execute()
-                balance_formula = f'=IF(F{next_row}="","",IF(LOWER(I{next_row})="pago",$B$1-F{next_row},IF(LOWER(I{next_row})="recebido",$B$1+F{next_row},$B$1)))' if next_row == 4 else f'=IF(F{next_row}="","",IF(LOWER(I{next_row})="pago",J{next_row - 1}-F{next_row},IF(LOWER(I{next_row})="recebido",J{next_row - 1}+F{next_row},J{next_row - 1})))'
+                opening_balance = f'IF(C{next_row}="PJ",$E$1,$B$1)'
+                balance_formula = f'=IF(G{next_row}="","",IF(LOWER(J{next_row})="pago",{opening_balance}-G{next_row},IF(LOWER(J{next_row})="recebido",{opening_balance}+G{next_row},{opening_balance})))' if next_row == 3 else f'=IF(G{next_row}="","",IF(LOWER(J{next_row})="pago",M{next_row - 1}-G{next_row},IF(LOWER(J{next_row})="recebido",M{next_row - 1}+G{next_row},M{next_row - 1})))'
                 self.service.spreadsheets().values().update(
                     spreadsheetId=self.spreadsheet_id,
-                    range=f"'{sheet_name}'!J{next_row}",
+                    range=f"'{sheet_name}'!M{next_row}",
                     valueInputOption="USER_ENTERED",
                     body={"values": [[balance_formula]]},
                 ).execute()
@@ -246,13 +233,13 @@ class SheetsHandler:
         try:
             values = self.service.spreadsheets().values().get(
                 spreadsheetId=self.spreadsheet_id,
-                    range=f"'{self.get_sheet_by_month()}'!A:O",
+                    range=f"'{self.get_sheet_by_month()}'!A:P",
                 ).execute().get("values", [])
             summary = {"receita": 0.0, "despesa": 0.0, "investimento": 0.0, "saldo": 0.0}
-            for row in values[3:]:
-                if len(row) < 7 or row[1] != tipo_pj_pf:
+            for row in values[2:]:
+                if len(row) < 7 or row[2] != tipo_pj_pf:
                     continue
-                value = self._parse_value(row[5])
+                value = self._parse_value(row[6])
                 movement = str(row[4]).strip().upper()
                 if movement in ("ENTRADA", "E", "RECEITA"):
                     summary["receita"] += value
@@ -303,15 +290,15 @@ class SheetsHandler:
             month_titles = [title for title in titles if title and title.casefold() not in excluded]
             rows = []
             read_titles = [title for title in month_titles if not month or month == "todos" or title.casefold() == month.casefold()]
-            ranges = [f"'{title}'!A:O" for title in read_titles]
+            ranges = [f"'{title}'!A:P" for title in read_titles]
             batch = self.service.spreadsheets().values().batchGet(spreadsheetId=self.spreadsheet_id, ranges=ranges, majorDimension="ROWS").execute().get("valueRanges", [])
             for title, value_range in zip(read_titles, batch):
                 values = value_range.get("values", [])
-                for row in values[3:]:
+                for row in values[2:]:
                     if len(row) < 7:
                         continue
                     row_date = self._parse_date(row[0])
-                    row_type = str(row[1]).strip().upper()
+                    row_type = str(row[2]).strip().upper()
                     if row_type not in ("PF", "PJ"):
                         continue
                     if tipo in ("PF", "PJ") and row_type != tipo:
@@ -322,7 +309,7 @@ class SheetsHandler:
                         if not selected_sheet and not selected_period:
                             continue
                     movement = "RECEITA" if str(row[4]).strip().upper() in ("E", "ENTRADA", "RECEITA", "RECEBIDO") else "DESPESA"
-                    rows.append({"date": row[0], "parsed_date": row_date, "type": row_type, "movement": movement, "category": row[2] if len(row) > 2 else "Sem categoria", "description": row[5] if len(row) > 5 else "", "value": self._parse_value(row[5] if len(row) > 5 else 0), "bank": row[6] if len(row) > 6 else "", "payment_method": row[7] if len(row) > 7 else "", "sheet": title})
+                    rows.append({"date": row[0], "parsed_date": row_date, "type": row_type, "movement": movement, "category": row[3] if len(row) > 3 else "Sem categoria", "description": row[5] if len(row) > 5 else "", "value": self._parse_value(row[6] if len(row) > 6 else 0), "bank": row[7] if len(row) > 7 else "", "payment_method": row[8] if len(row) > 8 else "", "sheet": title})
             metrics = {"receita": 0.0, "despesa": 0.0, "investimento": 0.0, "saldo": 0.0, "count": len(rows)}
             categories = {}
             types = {"PF": 0.0, "PJ": 0.0}
@@ -461,17 +448,17 @@ class SheetsHandler:
         if not self.service or not self.spreadsheet_id:
             return []
         try:
-            values = self.service.spreadsheets().values().get(spreadsheetId=self.spreadsheet_id, range=f"'{self.get_sheet_by_month()}'!A:O").execute().get("values", [])
+            values = self.service.spreadsheets().values().get(spreadsheetId=self.spreadsheet_id, range=f"'{self.get_sheet_by_month()}'!A:P").execute().get("values", [])
             found = []
-            for idx, row in enumerate(values[3:], start=4):
-                if len(row) < 7 or (tipo and row[1] != tipo):
+            for idx, row in enumerate(values[2:], start=3):
+                if len(row) < 7 or (tipo and row[2] != tipo):
                     continue
                 haystack = " ".join(str(x) for x in row).casefold()
                 if phone_number and f"telefone: {phone_number}" not in haystack:
                     continue
                 if keyword and keyword.casefold() not in haystack:
                     continue
-                found.append({"row": idx, "date": row[0], "type": row[1], "movement": row[4], "category": row[2], "description": row[5], "value": row[5]})
+                found.append({"row": idx, "date": row[0], "type": row[2], "movement": row[4], "category": row[3], "description": row[5], "value": row[6]})
                 if len(found) >= limit:
                     break
             return found
@@ -483,7 +470,7 @@ class SheetsHandler:
         if not self.service or not self.spreadsheet_id:
             return False
         try:
-            self.service.spreadsheets().values().clear(spreadsheetId=self.spreadsheet_id, range=f"'{self.get_sheet_by_month()}'!A{row_number}:O{row_number}").execute()
+            self.service.spreadsheets().values().clear(spreadsheetId=self.spreadsheet_id, range=f"'{self.get_sheet_by_month()}'!A{row_number}:P{row_number}").execute()
             return True
         except Exception as error:
             print(f"[Google Sheets] erro ao apagar transação: {error}")
@@ -493,16 +480,16 @@ class SheetsHandler:
         if not self.service or not self.spreadsheet_id:
             return False
         try:
-            row = self.service.spreadsheets().values().get(spreadsheetId=self.spreadsheet_id, range=f"'{self.get_sheet_by_month()}'!A{row_number}:O{row_number}").execute().get("values", [[]])[0]
-            while len(row) < 15:
+            row = self.service.spreadsheets().values().get(spreadsheetId=self.spreadsheet_id, range=f"'{self.get_sheet_by_month()}'!A{row_number}:P{row_number}").execute().get("values", [[]])[0]
+            while len(row) < 16:
                 row.append("")
             if value is not None:
-                row[5] = float(value)
+                row[6] = float(value)
             if category:
-                row[2] = category
+                row[3] = category
             if description:
                 row[5] = description
-            self.service.spreadsheets().values().update(spreadsheetId=self.spreadsheet_id, range=f"'{self.get_sheet_by_month()}'!A{row_number}:O{row_number}", valueInputOption="USER_ENTERED", body={"values": [row]}).execute()
+            self.service.spreadsheets().values().update(spreadsheetId=self.spreadsheet_id, range=f"'{self.get_sheet_by_month()}'!A{row_number}:P{row_number}", valueInputOption="USER_ENTERED", body={"values": [row]}).execute()
             return True
         except Exception as error:
             print(f"[Google Sheets] erro ao atualizar transação: {error}")
