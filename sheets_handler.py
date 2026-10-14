@@ -33,7 +33,6 @@ class SheetsHandler:
                 print("[Google Sheets] GOOGLE_CREDENTIALS_JSON não configurado")
                 return False
             self.service = discovery.build("sheets", "v4", credentials=self.credentials, cache_discovery=False)
-            self._migrate_monthly_sheets()
             return True
         except Exception as error:
             print(f"[Google Sheets] erro de autenticação: {error}")
