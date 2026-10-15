@@ -37,9 +37,9 @@ Nunca publique tokens ou o JSON da conta de serviço no GitHub. O arquivo `.env.
 Data | Mês | Ano | Escopo | Categoria | Código | Tipo | Descrição | Valor | Conta | Forma Pgto | Status | Conciliado | Meta | Saldo | Usuário | ID
 ```
 
-O bot identifica as colunas pelos cabeçalhos, não pela posição. Ele preenche Data, Mês, Ano, Escopo, Categoria, Código, Tipo (`E` para entrada e `S` para saída), Descrição, Valor, Conta, Forma Pgto, Status, Usuário e ID. `Conciliado` e `Saldo` ficam sob controle da planilha (checkbox/fórmula), e `Meta` fica vazio salvo futura configuração. A aba `Config` deve conservar o plano de contas e as opções de categorias, contas, pagamentos e status usados nas listas suspensas.
+O bot identifica as colunas pelos cabeçalhos, não pela posição. Ele preenche os campos de entrada, incluindo Categoria, Conta, Status e Meta. Categoria e Conta são verificadas contra as listas suspensas da aba `Config`; Meta usa a lista da aba `Metas e Limites`; Status aceita `Recebido`, `A receber`, `Pago` ou `A pagar`. Se não conseguir escolher uma opção com segurança, pergunta ao usuário e só grava depois da resposta. `Conciliado` e as colunas de fórmula permanecem sob controle da planilha.
 
-O bot grava na primeira linha sem lançamento, começando na linha 2. Para evitar duplicações, a coluna `ID` deve permanecer disponível para o identificador da mensagem do WhatsApp.
+Na coluna `Descrição`, o bot guarda o texto completo enviado no WhatsApp; para áudio, usa a transcrição; para foto, usa a legenda ou o texto/descrição lido do comprovante. A coluna `ID` recebe um identificador numérico de 12 dígitos derivado do ID da mensagem, preservando a deduplicação sem expor o identificador longo do WhatsApp. O bot grava na primeira linha sem lançamento, começando na linha 2.
 
 ## Render
 
@@ -86,6 +86,8 @@ Resumo PF
 Ajuda
 Categorias
 ```
+
+Também são aceitos áudios e fotos de comprovantes. O bot transcreve/analisa a mídia, pergunta pelos campos que faltarem e pede confirmação final antes de registrá-la. Em texto, registra diretamente quando os campos essenciais forem claros; se não, pergunta Categoria, Meta, Conta ou Status antes de gravar.
 
 ## Segurança
 
