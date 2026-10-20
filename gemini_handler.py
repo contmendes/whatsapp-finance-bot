@@ -11,7 +11,9 @@ class GeminiHandler:
 
     def __init__(self):
         self.api_key = os.getenv("GEMINI_API_KEY", "").strip()
-        self.model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+        # Gemini 2.5 Flash não está disponível para novos usuários.
+        # O 3.8 Flash suporta texto, imagem, áudio, PDF e saída estruturada.
+        self.model = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
         self.endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent"
 
     @property
