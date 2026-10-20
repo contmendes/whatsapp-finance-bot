@@ -36,17 +36,40 @@ received_message_lock = Lock()
 layout_sync_status = {"state": "idle"}
 
 
+def _send_whatsapp_reply(phone_number, message, source):
+    try:
+        if not whatsapp.send_message(phone_number, message):
+            print(f"[WhatsApp] não foi possível enviar resposta (origem={source})")
+    except Exception as error:
+        print(f"[WhatsApp] exceção ao enviar resposta (origem={source}): {error}")
+
+
+def _run_message_worker(processor, args, message_id):
+    try:
+        processor(*args)
+    except Exception as error:
+        print(f"[Webhook] falha no processamento em segundo plano: {error}")
+    finally:
+        if message_id:
+            with received_message_lock:
+                received_message_ids.discard(message_id)
+
+
 def is_valid_signature() -> bool:
     if not APP_SECRET:
         print("[Webhook] APP_SECRET não configurado")
         return False
     signature = request.headers.get("X-Hub-Signature-256", "")
     if not signature.startswith("sha256="):
+        print("[Webhook] assinatura ausente ou inválida")
         return False
     expected = "sha256=" + hmac.new(
         APP_SECRET.encode("utf-8"), request.get_data(cache=True), hashlib.sha256
     ).hexdigest()
-    return hmac.compare_digest(signature, expected)
+    valid = hmac.compare_digest(signature, expected)
+    if not valid:
+        print("[Webhook] assinatura inválida")
+    return valid
 
 
 def download_whatsapp_media(media_id):
@@ -73,6 +96,15 @@ def _normalize_choice(value):
     return re.sub(r"[^a-z0-9]+", " ", text).strip()
 
 
+def _scope_from_text(value):
+    text = _normalize_choice(value)
+    if re.search(r"\b(pj|cnpj|empresa|empresas|negocio|negocios)\b", text):
+        return "PJ"
+    if re.search(r"\b(pf|pessoal|particular|pessoa fisica)\b", text):
+        return "PF"
+    return None
+
+
 def _match_choice(value, options, allow_unique_partial=False):
     key = _normalize_choice(value)
     if not key:
@@ -85,6 +117,41 @@ def _match_choice(value, options, allow_unique_partial=False):
         if len(matches) == 1:
             return matches[0]
     return None
+
+
+def _match_payment_option(value, options, account=""):
+    key = _normalize_choice(value)
+    if not key:
+        return None
+    exact = _match_choice(value, options)
+    account_key = _normalize_choice(account)
+    if exact and (not account_key or account_key in _normalize_choice(exact)):
+        return exact
+    if exact and account_key:
+        return None
+    candidates = [option for option in options if key in _normalize_choice(option)]
+    if account_key:
+        candidates = [option for option in candidates if account_key in _normalize_choice(option)]
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _match_account_option(value, options):
+    exact = _match_choice(value, options)
+    if exact:
+        return exact
+    key = _normalize_choice(value)
+    if not key:
+        return None
+    candidates = [option for option in options if key in _normalize_choice(option)]
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _payment_option_name(method, account=""):
+    method = " ".join(str(method or "").split())
+    account = " ".join(str(account or "").split())
+    if account and _normalize_choice(account) not in _normalize_choice(method):
+        return f"{method} {account}".strip()
+    return method
 
 
 def _infer_status(message, movement):
@@ -107,28 +174,24 @@ def _resolve_account(transaction, options):
     accounts = options.get("accounts", [])
     if not accounts:
         return ""
-    confidence = float(transaction.get("_ai_confidence") or 0)
-    candidate = _match_choice(transaction.get("conta"), accounts)
-    if candidate and confidence >= 0.55:
-        return candidate
     raw = _normalize_choice(transaction.get("raw_message"))
     explicit = [option for option in accounts if _normalize_choice(option) and _normalize_choice(option) in raw]
     if len(explicit) == 1:
         return explicit[0]
     bank = _normalize_choice(transaction.get("banco"))
     matches = [option for option in accounts if bank and bank in _normalize_choice(option)]
-    scope = str(transaction.get("tipo") or "PF").upper()
+    scope = str(transaction.get("tipo") or "").upper()
+    if scope not in ("PF", "PJ"):
+        scope = ""
     markers = ("pj", "empresa", "empresas", "negocio") if scope == "PJ" else ("pf", "pessoal", "particular")
-    scoped = [option for option in matches if any(marker in _normalize_choice(option).split() for marker in markers)]
-    if scoped:
-        matches = scoped
-    if len(matches) == 1:
-        return matches[0]
-    scoped = [option for option in accounts if any(marker in _normalize_choice(option).split() for marker in markers)]
-    if len(scoped) == 1:
-        return scoped[0]
-    if len(accounts) == 1:
-        return accounts[0]
+    if bank:
+        if not matches:
+            return None
+        if scope:
+            scoped = [option for option in matches if any(marker in _normalize_choice(option).split() for marker in markers)]
+            if scoped:
+                matches = scoped
+        return matches[0] if len(matches) == 1 else None
     return None
 
 
@@ -137,6 +200,8 @@ def _prepare_transaction(transaction):
     transaction["_options"] = options
     confidence = float(transaction.get("_ai_confidence") or 0)
     raw = _normalize_choice(transaction.get("raw_message"))
+    scope = transaction.get("tipo") if transaction.get("tipo") in ("PF", "PJ") else _scope_from_text(transaction.get("raw_message"))
+    transaction["tipo"] = scope
 
     category = _match_choice(transaction.get("categoria"), options.get("categories", []))
     category_is_generic = category and _normalize_choice(category) in ("outro", "outros", "outras despesas")
@@ -166,6 +231,23 @@ def _prepare_transaction(transaction):
         transaction["_meta_confirmed"] = not bool(goals)
 
     transaction["conta"] = _resolve_account(transaction, options) or ""
+    bank = str(transaction.get("banco") or "").strip()
+    if bank and not transaction["conta"]:
+        bank_key = _normalize_choice(bank)
+        bank_matches = [option for option in options.get("accounts", []) if bank_key and bank_key in _normalize_choice(option)]
+        if not bank_matches:
+            transaction["_new_account_candidate"] = bank
+    payment_method = str(transaction.get("forma_pagamento") or "").strip()
+    if payment_method:
+        payment = _match_payment_option(payment_method, options.get("payment_methods", []), transaction["conta"])
+        if payment:
+            transaction["forma_pagamento"] = payment
+            transaction["_suggested_payment_method"] = ""
+        else:
+            transaction["forma_pagamento"] = ""
+            transaction["_suggested_payment_method"] = payment_method
+    else:
+        transaction["forma_pagamento"] = ""
     is_income = str(transaction.get("movimento", "")).upper() in ("RECEITA", "ENTRADA", "E")
     valid_statuses = ("Recebido", "A receber") if is_income else ("Pago", "A pagar")
     status = _match_choice(transaction.get("status"), valid_statuses)
@@ -180,6 +262,8 @@ def _prepare_transaction(transaction):
 
 def _transaction_question(transaction, field):
     options = transaction.get("_options", {})
+    if field == "tipo":
+        return "Esse lançamento é de Pessoa Física ou da empresa? Responda *PF* ou *PJ*."
     if field == "categoria":
         suggestion = transaction.get("_suggested_category")
         if suggestion:
@@ -193,7 +277,30 @@ def _transaction_question(transaction, field):
         return f"A qual meta devo associar? Opções: {labels}. Responda *sem meta* se não se aplicar."
     if field == "conta":
         accounts = options.get("accounts", [])
-        return "Qual conta devo usar? Responda com uma opção: " + " | ".join(accounts)
+        new_account = transaction.get("_new_account_candidate")
+        if new_account:
+            return (f"Não encontrei *{new_account}* no menu de contas. Envie o nome como deseja que apareça "
+                    "na planilha (por exemplo, *C6 Pessoal* ou *C6 Empresa*) e vou adicioná-lo."
+                    + (" Opções atuais: " + " | ".join(accounts) if accounts else ""))
+        return "Qual conta devo usar? Responda com uma opção: " + " | ".join(accounts) + "\nSe nenhuma servir, escreva o nome da nova conta para adicioná-la."
+    if field == "forma_pagamento":
+        suggestion = transaction.get("_suggested_payment_method") or ""
+        account = transaction.get("conta") or ""
+        proposed = _payment_option_name(suggestion, account)
+        if suggestion:
+            exact = _match_choice(suggestion, options.get("payment_methods", []))
+            account_key = _normalize_choice(account)
+            if exact and account_key and account_key not in _normalize_choice(exact):
+                available = [method for method in options.get("payment_methods", [])
+                             if account_key in _normalize_choice(method)]
+                return (f"A opção *{exact}* está vinculada a outra conta, não a *{account}*. "
+                        "Escolha uma forma de pagamento compatível"
+                        + (": " + " | ".join(available) if available else "")
+                        + ", ou escreva o nome de uma nova forma para adicioná-la.")
+            return (f"A forma de pagamento *{suggestion}* não está disponível para essa conta. "
+                    f"Responda *SIM* para adicioná-la como *{proposed}* ou escreva outra forma de pagamento.")
+        methods = options.get("payment_methods", [])
+        return "Qual foi a forma de pagamento? Opções: " + " | ".join(methods) + "\nSe não houver, escreva o nome para adicioná-lo."
     if field == "status":
         statuses = options.get("statuses", [])
         is_income = str(transaction.get("movimento", "")).upper() in ("RECEITA", "ENTRADA", "E")
@@ -230,21 +337,33 @@ def _save_transaction(transaction):
     )
 
 
+def _commit_pending_transaction(phone_number, transaction):
+    success, message = _save_transaction(transaction)
+    if success:
+        pending_transactions.pop(phone_number, None)
+        return message
+    transaction["awaiting"] = "retry_save"
+    pending_transactions[phone_number] = transaction
+    return f"{message}\n\nO lançamento continua pendente. Responda *TENTAR NOVAMENTE* para tentar salvar de novo ou *CANCELAR* para descartar."
+
+
 def _advance_transaction(phone_number, transaction):
-    if not transaction.get("categoria"):
+    if transaction.get("tipo") not in ("PF", "PJ"):
+        field = "tipo"
+    elif not transaction.get("categoria"):
         field = "categoria"
     elif not transaction.get("_meta_confirmed"):
         field = "meta"
-    elif transaction.get("_options", {}).get("accounts") and not transaction.get("conta"):
+    elif not transaction.get("conta") and (transaction.get("_options", {}).get("accounts") or transaction.get("banco")):
         field = "conta"
+    elif transaction.get("_suggested_payment_method"):
+        field = "forma_pagamento"
     elif not transaction.get("status"):
         field = "status"
     elif transaction.get("needs_confirmation"):
         field = "confirmar"
     else:
-        pending_transactions.pop(phone_number, None)
-        success, message = _save_transaction(transaction)
-        return message if success else message
+        return _commit_pending_transaction(phone_number, transaction)
     transaction["awaiting"] = field
     pending_transactions[phone_number] = transaction
     return _transaction_question(transaction, field)
@@ -262,11 +381,13 @@ def _continue_transaction(phone_number, reply):
         return None
     answer = _normalize_choice(reply)
     field = transaction.get("awaiting")
+    if field == "retry_save":
+        if answer in ("tentar novamente", "repetir", "sim", "salvar"):
+            return _commit_pending_transaction(phone_number, transaction)
+        return "Responda *TENTAR NOVAMENTE* para tentar salvar ou *CANCELAR* para descartar."
     if field == "confirmar":
         if answer in ("sim", "confirmar", "confirmo", "ok"):
-            pending_transactions.pop(phone_number, None)
-            success, message = _save_transaction(transaction)
-            return message if success else message
+            return _commit_pending_transaction(phone_number, transaction)
         if answer in ("nao", "cancelar", "cancela"):
             pending_transactions.pop(phone_number, None)
             return "Tudo bem, não registrei esse lançamento."
@@ -277,7 +398,18 @@ def _continue_transaction(phone_number, reply):
         return "Tudo bem, não registrei esse lançamento."
 
     options = transaction.get("_options", {})
-    if field == "categoria":
+    if field == "tipo":
+        scope = _scope_from_text(reply)
+        if not scope:
+            return _transaction_question(transaction, field)
+        transaction["tipo"] = scope
+        transaction["conta"] = _resolve_account(transaction, options) or ""
+        if transaction.get("banco") and not transaction["conta"]:
+            bank_key = _normalize_choice(transaction["banco"])
+            if not any(bank_key and bank_key in _normalize_choice(option) for option in options.get("accounts", [])):
+                transaction["_new_account_candidate"] = transaction["banco"]
+        return _advance_transaction(phone_number, transaction)
+    elif field == "categoria":
         suggestion = transaction.get("_suggested_category")
         choice = suggestion if answer in ("sim", "confirmo") and suggestion else _match_choice(reply, options.get("categories", []), allow_unique_partial=True)
         category_created = False
@@ -308,10 +440,59 @@ def _continue_transaction(phone_number, reply):
             transaction["meta"] = choice
         transaction["_meta_confirmed"] = True
     elif field == "conta":
-        choice = _match_choice(reply, options.get("accounts", []), allow_unique_partial=True)
+        choice = _match_account_option(reply, options.get("accounts", []))
+        added = False
         if choice is None:
-            return _transaction_question(transaction, field)
+            if answer in ("nao", "não", "nao sei", "nao tenho") or answer.startswith("nao "):
+                return _transaction_question(transaction, field)
+            new_name = transaction.get("_new_account_candidate", "") if answer in ("sim", "confirmo", "adicionar") else " ".join(str(reply).split())
+            if answer in ("sim", "confirmo", "adicionar") and new_name:
+                new_name = _payment_option_name(new_name, "Pessoal" if transaction.get("tipo") == "PF" else "Empresa")
+            if not new_name:
+                return _transaction_question(transaction, field)
+            ok, account_name, added, error_message = sheets.add_account_option(new_name)
+            if not ok:
+                return f"{error_message}\n\n" + _transaction_question(transaction, field)
+            choice = account_name
+            transaction["_account_added"] = added
         transaction["conta"] = choice
+        transaction["_new_account_candidate"] = ""
+        payment_candidate = transaction.get("_suggested_payment_method")
+        if payment_candidate:
+            payment = _match_payment_option(payment_candidate, options.get("payment_methods", []), choice)
+            if payment:
+                transaction["forma_pagamento"] = payment
+                transaction["_suggested_payment_method"] = ""
+        next_response = _advance_transaction(phone_number, transaction)
+        if added:
+            return f"✅ Adicionei a conta *{choice}* ao menu.\n\n{next_response}"
+        return next_response
+    elif field == "forma_pagamento":
+        suggestion = transaction.get("_suggested_payment_method") or ""
+        if answer in ("nao", "não", "nao sei", "nao tenho") or answer.startswith("nao "):
+            return _transaction_question(transaction, field)
+        method = suggestion if answer in ("sim", "confirmo", "adicionar") and suggestion else " ".join(str(reply).split())
+        exact_menu_choice = _match_choice(method, options.get("payment_methods", []))
+        account_key = _normalize_choice(transaction.get("conta"))
+        if exact_menu_choice and account_key and account_key not in _normalize_choice(exact_menu_choice):
+            return _transaction_question(transaction, field)
+        choice = _match_payment_option(method, options.get("payment_methods", []), transaction.get("conta"))
+        added = False
+        if choice is None:
+            option_name = _payment_option_name(method, transaction.get("conta"))
+            if not option_name:
+                return _transaction_question(transaction, field)
+            ok, payment_name, added, error_message = sheets.add_payment_method_option(option_name)
+            if not ok:
+                return f"{error_message}\n\n" + _transaction_question(transaction, field)
+            choice = payment_name
+            transaction["_payment_added"] = added
+        transaction["forma_pagamento"] = choice
+        transaction["_suggested_payment_method"] = ""
+        next_response = _advance_transaction(phone_number, transaction)
+        if added:
+            return f"✅ Adicionei *{choice}* ao menu de formas de pagamento.\n\n{next_response}"
+        return next_response
     elif field == "status":
         is_income = str(transaction.get("movimento", "")).upper() in ("RECEITA", "ENTRADA", "E")
         valid_statuses = ("Recebido", "A receber") if is_income else ("Pago", "A pagar")
@@ -366,13 +547,20 @@ def handle_message():
                             if len(received_message_ids) > 10000:
                                 received_message_ids.clear()
                     message_type = message.get("type")
+                    print(f"[Webhook] mensagem recebida; tipo={message_type or 'desconhecido'}")
                     if message_type != "text":
                         if message_type in ("audio", "image", "document"):
-                            Thread(target=process_media_message, args=(from_number, message, contacts.get(from_number, ""), message_id), daemon=True).start()
+                            Thread(target=_run_message_worker, args=(process_media_message, (from_number, message, contacts.get(from_number, ""), message_id), message_id), daemon=True).start()
+                        elif message_id:
+                            with received_message_lock:
+                                received_message_ids.discard(message_id)
                         continue
                     message_text = message.get("text", {}).get("body", "").strip()
                     if message_text:
-                        Thread(target=process_user_message, args=(from_number, message_text, contacts.get(from_number, ""), message_id), daemon=True).start()
+                        Thread(target=_run_message_worker, args=(process_user_message, (from_number, message_text, contacts.get(from_number, ""), message_id), message_id), daemon=True).start()
+                    elif message_id:
+                        with received_message_lock:
+                            received_message_ids.discard(message_id)
         return jsonify({"status": "ok"}), 200
     except Exception as error:
         print(f"[Webhook] erro ao processar mensagem: {error}")
@@ -381,7 +569,7 @@ def handle_message():
 
 def process_media_message(phone_number, message, contact_name="", message_id=""):
     if not gemini.configured:
-        whatsapp.send_message(phone_number, "📎 Recebi o arquivo, mas a análise ainda não está configurada. Envie o lançamento por texto por enquanto.")
+        _send_whatsapp_reply(phone_number, "📎 Recebi o arquivo, mas a análise ainda não está configurada. Envie o lançamento por texto por enquanto.", "mídia")
         return
     try:
         media = message.get(message.get("type"), {})
@@ -391,12 +579,12 @@ def process_media_message(phone_number, message, contact_name="", message_id="")
         options = sheets.get_transaction_options()
         result, error = gemini.extract_transaction(media_bytes, mime_type, profile["context"], categories, options)
         if error or not result:
-            whatsapp.send_message(phone_number, f"📎 {error or 'Não consegui ler o arquivo.'}")
+            _send_whatsapp_reply(phone_number, f"📎 {error or 'Não consegui ler o arquivo.'}", "mídia")
             return
         caption = str(media.get("caption") or "").strip()
         raw_message = caption or result.get("transcricao") or result.get("descricao") or "Mídia enviada pelo WhatsApp"
         transaction = {
-            "tipo": result.get("tipo") or profile["context"],
+            "tipo": result.get("tipo") if result.get("tipo") in ("PF", "PJ") else _scope_from_text(raw_message),
             "movimento": result.get("movimento") or "DESPESA",
             "valor": result.get("valor"),
             "data": result.get("data"),
@@ -413,17 +601,17 @@ def process_media_message(phone_number, message, contact_name="", message_id="")
             "message_id": message_id,
             "needs_confirmation": True,
         }
-        whatsapp.send_message(phone_number, _start_transaction(phone_number, transaction))
+        _send_whatsapp_reply(phone_number, _start_transaction(phone_number, transaction), "mídia")
     except Exception as error:
         print(f"[Media] erro ao processar arquivo: {error}")
-        whatsapp.send_message(phone_number, "📎 Recebi o arquivo, mas não consegui analisá-lo. Envie uma foto mais nítida ou uma mensagem de texto.")
+        _send_whatsapp_reply(phone_number, "📎 Recebi o arquivo, mas não consegui analisá-lo. Envie uma foto mais nítida ou uma mensagem de texto.", "mídia")
 
 
 def process_user_message(phone_number, message_text, contact_name="", message_id=""):
     message_upper = message_text.upper().strip()
     pending_response = _continue_transaction(phone_number, message_text)
     if pending_response is not None:
-        whatsapp.send_message(phone_number, pending_response)
+        _send_whatsapp_reply(phone_number, pending_response, "conversa pendente")
         return
     response = None
     profile = sheets.get_profile(phone_number, contact_name)
@@ -438,10 +626,10 @@ def process_user_message(phone_number, message_text, contact_name="", message_id
         response = f"👤 *Seu perfil*\nNome: {profile['name']}\nContexto atual: {profile['context']}\nTipo padrão: {profile['default_type']}\n\nEnvie *usar PF* ou *usar PJ* para trocar."
     elif message_upper in ("USAR PF", "PF"):
         sheets.set_profile_context(phone_number, "PF", contact_name)
-        response = "✅ Contexto alterado para *PF*. Agora mensagens sem indicação usarão PF."
+        response = "✅ Contexto do perfil alterado para *PF*. Se um lançamento não deixar claro se é pessoal ou da empresa, vou perguntar antes de registrar."
     elif message_upper in ("USAR PJ", "PJ"):
         sheets.set_profile_context(phone_number, "PJ", contact_name)
-        response = "✅ Contexto alterado para *PJ*. Agora mensagens sem indicação usarão PJ."
+        response = "✅ Contexto do perfil alterado para *PJ*. Se um lançamento não deixar claro se é pessoal ou da empresa, vou perguntar antes de registrar."
 
     if message_upper == "AJUDA":
         response = whatsapp.get_help_message()
@@ -505,7 +693,7 @@ def process_user_message(phone_number, message_text, contact_name="", message_id
                 tipo_pj_pf, tipo_movimento, categoria, valor, descricao = profile["context"], "DESPESA", "", float(interpreted["valor"]), interpreted.get("descricao") or ""
             bank, payment = whatsapp.extract_payment_details(message_text)
             transaction = {
-                "tipo": interpreted.get("tipo") if interpreted.get("tipo") in ("PF", "PJ") else tipo_pj_pf,
+                "tipo": _scope_from_text(message_text),
                 "movimento": interpreted.get("movimento") or tipo_movimento,
                 "valor": valor or interpreted.get("valor"),
                 "data": interpreted.get("data") or whatsapp.extract_date(message_text),
@@ -533,7 +721,7 @@ def process_user_message(phone_number, message_text, contact_name="", message_id
         elif intent == "switch_context":
             context = interpreted.get("contexto") if interpreted.get("contexto") in ("PF", "PJ") else profile["context"]
             sheets.set_profile_context(phone_number, context, contact_name)
-            response = f"✅ Contexto alterado para *{context}*. Os próximos lançamentos sem indicação usarão esse contexto."
+            response = f"✅ Contexto do perfil alterado para *{context}*. Se um lançamento não deixar claro o contexto, vou perguntar antes de registrar."
         elif intent == "help":
             response = whatsapp.get_help_message()
         elif intent == "search":
@@ -547,7 +735,7 @@ def process_user_message(phone_number, message_text, contact_name="", message_id
                 transaction_date = whatsapp.extract_date(message_text)
                 bank, payment = whatsapp.extract_payment_details(message_text)
                 transaction = {
-                    "tipo": tipo_pj_pf,
+                    "tipo": _scope_from_text(message_text),
                     "movimento": tipo_movimento,
                     "valor": valor,
                     "data": transaction_date,
@@ -566,7 +754,7 @@ def process_user_message(phone_number, message_text, contact_name="", message_id
                 response = _start_transaction(phone_number, transaction)
 
     if response:
-        whatsapp.send_message(phone_number, response)
+        _send_whatsapp_reply(phone_number, response, "texto")
 
 
 @app.route("/health", methods=["GET"])

@@ -152,6 +152,8 @@ class WhatsAppHandler:
             (r"cartão de débito|cartao de debito|débito|debito", "Cartão de débito"),
             (r"dinheiro|espécie|especie", "Dinheiro"), (r"boleto", "Boleto"),
             (r"transferência|transferencia|ted|doc", "Transferência"),
+            (r"apple\s*pay", "Apple Pay"), (r"google\s*pay", "Google Pay"),
+            (r"samsung\s*pay", "Samsung Pay"), (r"paypal", "PayPal"),
         ]
         for pattern, label in payment_patterns:
             if re.search(pattern, normalized):
@@ -168,7 +170,7 @@ Você pode falar comigo de forma natural, sem formato fixo:
 • *investi 500 em ações*
 • Também posso ler fotos de comprovantes e transcrever áudios.
 
-Se não indicar PF/PJ, uso PF. Comandos:
+Se não indicar PF/PJ, pergunto antes de registrar. Se uma conta ou forma de pagamento não estiver na lista, você pode informar o nome para adicioná-la. Comandos:
 • *Resumo PF* ou *Resumo PJ*
 • *Categorias*
 • *Categoria adicionar PF despesa Mercado*

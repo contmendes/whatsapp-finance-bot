@@ -273,6 +273,53 @@ class SheetsHandler:
         return [str(row[column_index]).strip() for row in self._config_rows()[2:]
                 if len(row) > column_index and str(row[column_index]).strip()]
 
+    def _add_config_option(self, column_index, value):
+        if not self.service or not self.spreadsheet_id:
+            return False, "", False, "❌ Google Sheets não está configurado."
+        if column_index not in (4, 6):
+            return False, "", False, "❌ Não é permitido alterar essa lista da planilha."
+        name = " ".join(str(value or "").split())
+        if len(name) < 2 or len(name) > 80 or any(ord(char) < 32 for char in name):
+            return False, "", False, "❌ O nome precisa ter entre 2 e 80 caracteres."
+        try:
+            with self._write_lock:
+                self._config_cache = None
+                self._config_cache_time = 0
+                options = self._config_options(column_index)
+                existing = self.match_option(name, options)
+                if existing:
+                    return True, existing, False, ""
+                rows = self._config_rows()
+                last_used_row = 2
+                for row_number, row in enumerate(rows, start=1):
+                    if row_number >= 3 and len(row) > column_index and str(row[column_index] or "").strip():
+                        last_used_row = row_number
+                target_row = last_used_row + 1
+                if target_row > 1000:
+                    return False, "", False, "❌ A lista da planilha está cheia; não consegui adicionar essa opção."
+                column = self._column_letter(column_index)
+                self.service.spreadsheets().values().update(
+                    spreadsheetId=self.spreadsheet_id,
+                    range=f"'Config'!{column}{target_row}",
+                    valueInputOption="RAW",
+                    body={"values": [[name]]},
+                ).execute()
+                self._config_cache = None
+                self._config_cache_time = 0
+            return True, name, True, ""
+        except Exception as error:
+            label = "forma de pagamento" if column_index == 4 else "conta"
+            print(f"[Google Sheets] erro ao adicionar opção de {label}: {error}")
+            return False, "", False, f"❌ Não consegui adicionar essa opção à planilha. Verifique se ela permite edição e tente novamente."
+
+    def add_account_option(self, account):
+        """Add an account label only to Config!G, the source of the Conta validation."""
+        return self._add_config_option(6, account)
+
+    def add_payment_method_option(self, payment_method):
+        """Add a payment label only to Config!E, the source of the Forma Pgto validation."""
+        return self._add_config_option(4, payment_method)
+
     def get_category_options(self):
         options = self._config_options(16)  # Config!Q, validação da coluna E.
         if options:
@@ -386,6 +433,7 @@ class SheetsHandler:
         return {
             "categories": self.get_category_options(),
             "accounts": self._config_options(6),  # Config!G, validação da coluna J.
+            "payment_methods": self._config_options(4),  # Config!E, validação da coluna K.
             "goals": self.get_meta_options(),
             "statuses": list(STATUS_OPTIONS),
         }
@@ -425,14 +473,10 @@ class SheetsHandler:
                 account_options = self._config_options(6)
                 payment_options = self._config_options(4)
                 account = self.match_option(account, account_options) if account_options else account
-                bank_key = self._normal_header(bank)
-                if not account and bank_key:
-                    possible = [option for option in account_options if bank_key in self._normal_header(option)]
-                    if possible:
-                        scope_hint = "empresas" if str(tipo_pj_pf).upper() == "PJ" else "pessoal"
-                        account = next((x for x in possible if scope_hint in self._normal_header(x)), possible[0])
                 if account_options and not account:
                     return False, "❌ Não consegui associar uma Conta válida do menu da planilha."
+                if account and account_options and not self.match_option(account, account_options):
+                    return False, "❌ A Conta informada não corresponde às opções da planilha."
                 meta_options = self.get_meta_options()
                 if meta:
                     meta = self.match_option(meta, meta_options) if meta_options else ""
@@ -440,12 +484,20 @@ class SheetsHandler:
                         return False, "❌ A Meta informada não corresponde às opções da planilha."
                 payment = ""
                 method_key = self._normal_header(payment_method)
-                payment_matches = []
                 if method_key:
+                    exact_payment = self.match_option(payment_method, payment_options)
                     payment_matches = [option for option in payment_options if method_key in self._normal_header(option)]
                     if account:
-                        payment = next((x for x in payment_matches if self._normal_header(account) in self._normal_header(x)), "")
-                    payment = payment or (payment_matches[0] if payment_matches else "")
+                        account_key = self._normal_header(account)
+                        payment_matches = [option for option in payment_matches if account_key in self._normal_header(option)]
+                    if exact_payment:
+                        if account and self._normal_header(account) not in self._normal_header(exact_payment):
+                            return False, "❌ A Forma de Pgto selecionada está vinculada a outra conta da planilha."
+                        payment = exact_payment
+                    elif len(payment_matches) == 1:
+                        payment = payment_matches[0]
+                    else:
+                        return False, "❌ A Forma de Pgto não corresponde a uma opção única do menu da planilha."
                 categoria = (str(categoria or "").strip() if category_added
                              else self._resolve_category(categoria, tipo_pj_pf, movement))
                 if not categoria:
