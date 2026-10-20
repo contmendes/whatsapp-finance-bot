@@ -183,8 +183,10 @@ def _transaction_question(transaction, field):
     if field == "categoria":
         suggestion = transaction.get("_suggested_category")
         if suggestion:
-            return f"Qual categoria devo usar? Minha sugestão é *{suggestion}*. Responda *SIM* para aceitar ou escreva outra categoria da lista."
-        return "Qual categoria da lista da planilha melhor representa esse lançamento? Escreva o nome da categoria."
+            return (f"Qual categoria devo usar? Minha sugestão é *{suggestion}*. Responda *SIM* para aceitar, "
+                    "ou escreva outra categoria. Se ela ainda não existir, vou adicioná-la ao plano de contas.")
+        return ("Qual categoria devo usar? Escreva o nome. Se ainda não existir na planilha, "
+                "vou adicioná-la ao plano de contas e à lista de categorias.")
     if field == "meta":
         goals = options.get("goals", [])
         labels = " / ".join(goals) if goals else "nenhuma meta disponível"
@@ -224,6 +226,7 @@ def _save_transaction(transaction):
         account=transaction.get("conta") or "",
         meta=transaction.get("meta") or "",
         status=transaction.get("status") or "",
+        category_added=bool(transaction.get("_category_added")),
     )
 
 
@@ -277,10 +280,24 @@ def _continue_transaction(phone_number, reply):
     if field == "categoria":
         suggestion = transaction.get("_suggested_category")
         choice = suggestion if answer in ("sim", "confirmo") and suggestion else _match_choice(reply, options.get("categories", []), allow_unique_partial=True)
+        category_created = False
         if not choice:
-            return _transaction_question(transaction, field)
+            if answer in ("sim", "confirmo", "nao", "nao sei", "nao tenho") or answer.startswith("nao "):
+                return _transaction_question(transaction, field)
+            added, category_name, category_created, error_message = sheets.add_category_to_plan(
+                reply, transaction.get("tipo") or "PF", transaction.get("movimento") or "DESPESA"
+            )
+            if not added:
+                return f"{error_message}\n\n" + _transaction_question(transaction, field)
+            choice = category_name
+            # O nome foi encontrado ou gravado na fonte que alimenta a validação da planilha.
+            transaction["_category_added"] = True
         transaction["categoria"] = choice
         transaction["_suggested_category"] = ""
+        next_response = _advance_transaction(phone_number, transaction)
+        if category_created:
+            return f"✅ Adicionei *{choice}* ao plano de contas e à lista de categorias.\n\n{next_response}"
+        return next_response
     elif field == "meta":
         if answer in ("sem meta", "nenhuma", "nenhuma meta", "nenhum", "nenhum objetivo", "sem objetivo", "nao se aplica"):
             transaction["meta"] = ""

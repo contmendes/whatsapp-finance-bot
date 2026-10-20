@@ -282,6 +282,91 @@ class SheetsHandler:
             name for scope in categories.values() for group in scope.values() for name in group
         ))
 
+    @staticmethod
+    def _category_code_prefix(scope, movement):
+        scope = str(scope or "PF").strip().upper()
+        movement = str(movement or "DESPESA").strip().upper()
+        if movement in ("INVESTIMENTO", "INVESTIMENTOS"):
+            return "7", 2, 98
+        if scope == "PF":
+            if movement in ("RECEITA", "ENTRADA", "E"):
+                return "9.01", 8, 98
+            return "9.12", 2, 98
+        if movement in ("RECEITA", "ENTRADA", "E"):
+            return "1", 3, 98
+        return "4.99", 1, 98
+
+    @staticmethod
+    def _is_transaction_category(code, name):
+        code, name = str(code or "").strip(), str(name or "").strip()
+        return bool(code and len(name) >= 4 and (not code.startswith("9.") or len(code) >= 7))
+
+    def add_category_to_plan(self, category, scope, movement):
+        """Add a user-supplied category to Config's plan of accounts.
+
+        The sheet derives Config!Q/S/U and the Lançamentos dropdown from columns A:B,
+        so writing the account code and name is the source-of-truth update.
+        """
+        if not self.service or not self.spreadsheet_id:
+            return False, "", False, "❌ Google Sheets não está configurado."
+        name = " ".join(str(category or "").split())
+        if len(name) < 4 or len(name) > 60 or any(ord(char) < 32 for char in name):
+            return False, "", False, "❌ O nome da categoria precisa ter entre 4 e 60 caracteres para aparecer no menu da planilha."
+        if str(scope or "").upper() not in ("PF", "PJ", "GERAL"):
+            return False, "", False, "❌ Não consegui identificar se a categoria é PF ou PJ."
+        if str(movement or "").upper() not in ("RECEITA", "ENTRADA", "E", "DESPESA", "INVESTIMENTO", "INVESTIMENTOS"):
+            movement = "DESPESA"
+
+        try:
+            with self._write_lock:
+                values = self.service.spreadsheets().values().get(
+                    spreadsheetId=self.spreadsheet_id,
+                    range="'Config'!A3:B1004",
+                    valueRenderOption="UNFORMATTED_VALUE",
+                ).execute().get("values", [])
+                target_key = self._normalize_option(name)
+                existing_codes = set()
+                last_used_row = 2
+                for row_number, row in enumerate(values, start=3):
+                    code = str(row[0]).strip() if len(row) > 0 and row[0] is not None else ""
+                    existing_name = str(row[1]).strip() if len(row) > 1 and row[1] is not None else ""
+                    if code or existing_name:
+                        last_used_row = row_number
+                    if code:
+                        existing_codes.add(code)
+                    if code and existing_name and self._normalize_option(existing_name) == target_key:
+                        if self._is_transaction_category(code, existing_name):
+                            return True, existing_name, False, ""
+                        return False, "", False, "❌ Esse nome já é um grupo do plano de contas, não uma categoria lançável. Escolha um nome diferente."
+
+                target_row = last_used_row + 1
+                if target_row > 1002:
+                    return False, "", False, "❌ O plano de contas está cheio; não consegui adicionar essa categoria."
+
+                prefix, start, end = self._category_code_prefix(scope, movement)
+                code = ""
+                for number in range(start, end + 1):
+                    candidate = f"{prefix}.{number:02d}"
+                    if candidate not in existing_codes:
+                        code = candidate
+                        break
+                if not code:
+                    return False, "", False, "❌ Não encontrei um código livre para essa categoria no plano de contas."
+
+                self.service.spreadsheets().values().update(
+                    spreadsheetId=self.spreadsheet_id,
+                    range=f"'Config'!A{target_row}:B{target_row}",
+                    valueInputOption="RAW",
+                    body={"values": [[code, name]]},
+                ).execute()
+                self._config_cache = None
+                self._config_cache_time = 0
+                self._dashboard_cache.clear()
+            return True, name, True, ""
+        except Exception as error:
+            print(f"[Google Sheets] erro ao criar categoria no plano de contas: {error}")
+            return False, "", False, "❌ Não consegui adicionar a categoria ao plano de contas. A planilha pode estar sem espaço disponível ou sem permissão de edição."
+
     def get_meta_options(self):
         if not self.service or not self.spreadsheet_id:
             return []
@@ -305,7 +390,7 @@ class SheetsHandler:
             "statuses": list(STATUS_OPTIONS),
         }
 
-    def add_transaction(self, tipo_pj_pf, tipo_movimento, categoria, descricao, valor, phone_number="", contact_name="", message_id="", raw_message="", transaction_date=None, bank="", payment_method="", account="", meta="", status=""):
+    def add_transaction(self, tipo_pj_pf, tipo_movimento, categoria, descricao, valor, phone_number="", contact_name="", message_id="", raw_message="", transaction_date=None, bank="", payment_method="", account="", meta="", status="", category_added=False):
         if not self.service or not self.spreadsheet_id:
             return False, "❌ Google Sheets não está configurado no Render."
         try:
@@ -361,7 +446,8 @@ class SheetsHandler:
                     if account:
                         payment = next((x for x in payment_matches if self._normal_header(account) in self._normal_header(x)), "")
                     payment = payment or (payment_matches[0] if payment_matches else "")
-                categoria = self._resolve_category(categoria, tipo_pj_pf, movement)
+                categoria = (str(categoria or "").strip() if category_added
+                             else self._resolve_category(categoria, tipo_pj_pf, movement))
                 if not categoria:
                     return False, "❌ A Categoria informada não corresponde às opções da planilha."
 

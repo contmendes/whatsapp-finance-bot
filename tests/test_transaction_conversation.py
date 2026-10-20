@@ -87,6 +87,43 @@ class TransactionConversationTests(unittest.TestCase):
         self.assertEqual(result, "saved")
         self.assertEqual(save.call_args.kwargs["status"], "Pago")
 
+    def test_unknown_category_is_added_to_plan_and_used_for_transaction(self):
+        no_optional_choices = {**OPTIONS, "accounts": [], "goals": []}
+        transaction = {
+            "tipo": "PF", "movimento": "DESPESA", "valor": 42.0,
+            "categoria": None, "status": None, "raw_message": "Paguei R$ 42",
+            "_ai_confidence": 0,
+        }
+        with patch.object(main.sheets, "get_transaction_options", return_value=no_optional_choices), \
+             patch.object(main.sheets, "add_category_to_plan", return_value=(True, "Veterinário", True, "")) as add_category, \
+             patch.object(main.sheets, "add_transaction", return_value=(True, "saved")) as save:
+            first_reply = main._start_transaction("phone", transaction)
+            self.assertIn("Qual categoria", first_reply)
+
+            final_reply = main._continue_transaction("phone", "Veterinário")
+
+        self.assertIn("Adicionei *Veterinário*", final_reply)
+        self.assertIn("saved", final_reply)
+        add_category.assert_called_once_with("Veterinário", "PF", "DESPESA")
+        self.assertEqual(save.call_args.args[2], "Veterinário")
+        self.assertTrue(save.call_args.kwargs["category_added"])
+        self.assertNotIn("phone", main.pending_transactions)
+
+    def test_failed_category_addition_returns_explanation_and_keeps_conversation(self):
+        no_optional_choices = {**OPTIONS, "accounts": [], "goals": []}
+        transaction = {
+            "tipo": "PF", "movimento": "DESPESA", "valor": 42.0,
+            "categoria": None, "status": None, "raw_message": "Paguei R$ 42",
+            "_ai_confidence": 0,
+        }
+        with patch.object(main.sheets, "get_transaction_options", return_value=no_optional_choices), \
+             patch.object(main.sheets, "add_category_to_plan", return_value=(False, "", False, "Não consegui editar a planilha.")):
+            main._start_transaction("phone", transaction)
+            reply = main._continue_transaction("phone", "Veterinário")
+
+        self.assertIn("Não consegui editar a planilha", reply)
+        self.assertEqual(main.pending_transactions["phone"]["awaiting"], "categoria")
+
 
 if __name__ == "__main__":
     unittest.main()
