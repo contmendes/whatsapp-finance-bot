@@ -778,18 +778,26 @@ class SheetsHandler:
                 for sheet in metadata.get("sheets", [])
             }
             if "Perfis" not in titles:
-                self.service.spreadsheets().batchUpdate(
-                    spreadsheetId=self.spreadsheet_id,
-                    body={"requests": [{"addSheet": {"properties": {"title": "Perfis"}}}]},
-                ).execute()
+                try:
+                    self.service.spreadsheets().batchUpdate(spreadsheetId=self.spreadsheet_id, body={"requests": [{"addSheet": {"properties": {"title": "Perfis"}}}]}).execute()
+                except Exception as create_error:
+                    if "already exists" not in str(create_error).casefold():
+                        raise
             values = self.service.spreadsheets().values().get(
                 spreadsheetId=self.spreadsheet_id, range="'Perfis'!A:E"
             ).execute().get("values", [])
+            headers = [["Telefone", "Nome", "Tipo padrão", "Contexto atual", "Empresa"]]
+            if not values:
+                self.service.spreadsheets().values().update(
+                    spreadsheetId=self.spreadsheet_id,
+                    range="'Perfis'!A1:E1",
+                    valueInputOption="USER_ENTERED",
+                    body={"values": headers},
+                ).execute()
+                values = headers
             for row in values[1:]:
                 if row and row[0] == phone_number:
                     return {"phone": row[0], "name": row[1] if len(row) > 1 and row[1] else contact_name or "Usuário", "default_type": row[2] if len(row) > 2 and row[2] in ("PF", "PJ") else "PF", "context": row[3] if len(row) > 3 and row[3] in ("PF", "PJ") else "PF", "company": row[4] if len(row) > 4 else ""}
-            if not values:
-                self.service.spreadsheets().values().update(spreadsheetId=self.spreadsheet_id, range="'Perfis'!A1:E1", valueInputOption="USER_ENTERED", body={"values": [["Telefone", "Nome", "Tipo padrão", "Contexto atual", "Empresa"]]}).execute()
             self.service.spreadsheets().values().append(spreadsheetId=self.spreadsheet_id, range="'Perfis'!A:E", valueInputOption="USER_ENTERED", insertDataOption="INSERT_ROWS", body={"values": [[phone_number, defaults["name"], "PF", "PF", ""]]}).execute()
             return defaults
         except Exception as error:

@@ -13,7 +13,14 @@ class GeminiHandler:
         self.api_key = os.getenv("GEMINI_API_KEY", "").strip()
         # Gemini 2.5 Flash não está disponível para novos usuários.
         # O 3.8 Flash suporta texto, imagem, áudio, PDF e saída estruturada.
-        self.model = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
+        configured_model = os.getenv("GEMINI_MODEL", "").strip()
+        if configured_model.startswith("models/"):
+            configured_model = configured_model.removeprefix("models/")
+        self.model = (
+            "gemini-3.8-flash"
+            if configured_model in ("", "gemini-2.5-flash")
+            else configured_model
+        )
         self.endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent"
 
     @property

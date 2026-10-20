@@ -621,6 +621,9 @@ def process_media_message(phone_number, message, contact_name="", message_id="")
 
 def process_user_message(phone_number, message_text, contact_name="", message_id=""):
     message_upper = message_text.upper().strip()
+    if message_upper == "AJUDA":
+        _send_whatsapp_reply(phone_number, whatsapp.get_help_message(), "ajuda")
+        return
     pending_response = _continue_transaction(phone_number, message_text)
     if pending_response is not None:
         _send_whatsapp_reply(phone_number, pending_response, "conversa pendente")
@@ -643,9 +646,7 @@ def process_user_message(phone_number, message_text, contact_name="", message_id
         sheets.set_profile_context(phone_number, "PJ", contact_name)
         response = "✅ Contexto do perfil alterado para *PJ*. Se um lançamento não deixar claro se é pessoal ou da empresa, vou perguntar antes de registrar."
 
-    if message_upper == "AJUDA":
-        response = whatsapp.get_help_message()
-    elif message_upper in ("CATEGORIAS", "CATEGORIA", "LISTA DE CATEGORIAS"):
+    if message_upper in ("CATEGORIAS", "CATEGORIA", "LISTA DE CATEGORIAS"):
         response = get_categories_text(sheets.get_categories())
     elif message_upper.startswith("CATEGORIA "):
         parts = message_text.split(None, 4)
