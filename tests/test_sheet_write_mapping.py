@@ -25,12 +25,17 @@ class FakeValues:
     def __init__(self, rows):
         self.rows = rows
         self.last_batch = None
+        self.last_update = None
 
     def get(self, **kwargs):
         return FakeRequest({"values": self.rows})
 
     def batchUpdate(self, **kwargs):
         self.last_batch = kwargs["body"]
+        return FakeRequest({})
+
+    def update(self, **kwargs):
+        self.last_update = kwargs
         return FakeRequest({})
 
 
@@ -114,7 +119,7 @@ class SheetWriteMappingTests(unittest.TestCase):
         handler._config_cache = None
         handler._config_cache_time = 0
         handler._config_options = lambda column_index: {
-            4: ["Pix", "Cartão de crédito"],
+            4: ["Pix Conta PF", "Cartão de crédito Conta PF"],
             6: ["Conta PF", "Conta PJ"],
         }.get(column_index, [])
         handler.get_category_options = lambda: ["Mercado", "Transporte"]
@@ -164,6 +169,94 @@ class SheetWriteMappingTests(unittest.TestCase):
 
     def test_option_matching_ignores_accents_and_case(self):
         self.assertEqual(SheetsHandler.match_option("cartao de credito", ["Cartão de crédito"]), "Cartão de crédito")
+
+    def test_add_payment_method_appends_only_to_config_column_e(self):
+        config_rows = [[""] * 21 for _ in range(4)]
+        config_rows[2][4] = "Pix"
+        config_rows[3][4] = "Cartão de crédito"
+        handler = SheetsHandler.__new__(SheetsHandler)
+        handler.service = FakeService(config_rows)
+        handler.spreadsheet_id = "test-spreadsheet"
+        handler._write_lock = Lock()
+        handler._config_cache = None
+        handler._config_cache_time = 0
+
+        success, name, created, error = handler.add_payment_method_option("Apple Pay")
+
+        self.assertTrue(success, error)
+        self.assertEqual(name, "Apple Pay")
+        self.assertTrue(created)
+        self.assertEqual(handler.service.spreadsheet.values_api.last_update["range"], "'Config'!E5")
+        self.assertEqual(handler.service.spreadsheet.values_api.last_update["body"]["values"], [["Apple Pay"]])
+
+    def test_add_account_appends_only_to_config_column_g(self):
+        config_rows = [[""] * 21 for _ in range(4)]
+        config_rows[2][6] = "Itaú"
+        config_rows[3][6] = "Inter Pessoal"
+        handler = SheetsHandler.__new__(SheetsHandler)
+        handler.service = FakeService(config_rows)
+        handler.spreadsheet_id = "test-spreadsheet"
+        handler._write_lock = Lock()
+        handler._config_cache = None
+        handler._config_cache_time = 0
+
+        success, name, created, error = handler.add_account_option("C6 Pessoal")
+
+        self.assertTrue(success, error)
+        self.assertEqual(name, "C6 Pessoal")
+        self.assertTrue(created)
+        self.assertEqual(handler.service.spreadsheet.values_api.last_update["range"], "'Config'!G5")
+        self.assertEqual(handler.service.spreadsheet.values_api.last_update["body"]["values"], [["C6 Pessoal"]])
+
+    def test_unknown_bank_hint_does_not_select_existing_account(self):
+        handler = SheetsHandler.__new__(SheetsHandler)
+        handler.service = FakeService([HEADERS.copy()])
+        handler.spreadsheet_id = "test-spreadsheet"
+        handler._dashboard_cache = {}
+        handler._write_lock = Lock()
+        handler._processed_message_ids = set()
+        handler._config_cache = None
+        handler._config_cache_time = 0
+        handler._config_options = lambda column_index: {4: ["Pix Itaú"], 6: ["Itaú"]}.get(column_index, [])
+        handler.get_category_options = lambda: ["Mercado"]
+        handler.get_meta_options = lambda: []
+
+        with patch.dict("os.environ", {"SHEET_NAME": "Lançamentos"}):
+            success, message = handler.add_transaction(
+                "PF", "DESPESA", "Mercado", "Compra", 12,
+                raw_message="Paguei 12 no Banco C6", bank="C6", account="",
+            )
+
+        self.assertFalse(success)
+        self.assertIn("Conta", message)
+        self.assertIsNone(handler.service.spreadsheet.values_api.last_batch)
+
+    def test_ambiguous_payment_does_not_choose_first_menu_item(self):
+        handler = SheetsHandler.__new__(SheetsHandler)
+        handler.service = FakeService([HEADERS.copy()])
+        handler.spreadsheet_id = "test-spreadsheet"
+        handler._dashboard_cache = {}
+        handler._write_lock = Lock()
+        handler._processed_message_ids = set()
+        handler._config_cache = None
+        handler._config_cache_time = 0
+        handler._config_options = lambda column_index: {
+            4: ["Cartão de crédito Inter Empresas", "Cartão de crédito Inter Pessoal"],
+            6: ["Itaú"],
+        }.get(column_index, [])
+        handler.get_category_options = lambda: ["Mercado"]
+        handler.get_meta_options = lambda: []
+
+        with patch.dict("os.environ", {"SHEET_NAME": "Lançamentos"}):
+            success, message = handler.add_transaction(
+                "PF", "DESPESA", "Mercado", "Compra", 12,
+                raw_message="Paguei com cartão de crédito", account="Itaú",
+                payment_method="Cartão de crédito",
+            )
+
+        self.assertFalse(success)
+        self.assertIn("Forma de Pgto", message)
+        self.assertIsNone(handler.service.spreadsheet.values_api.last_batch)
 
 
 if __name__ == "__main__":
