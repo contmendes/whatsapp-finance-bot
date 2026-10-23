@@ -436,9 +436,17 @@ def _continue_transaction(phone_number, reply):
         else:
             choice = _match_choice(reply, options.get("goals", []), allow_unique_partial=True)
             if choice is None:
-                return _transaction_question(transaction, field)
+                ok, meta_name, added, error_message = sheets.add_meta_option(reply)
+                if not ok:
+                    return f"{error_message}\n\n" + _transaction_question(transaction, field)
+                choice = meta_name
+                transaction["_meta_added"] = added
             transaction["meta"] = choice
         transaction["_meta_confirmed"] = True
+        next_response = _advance_transaction(phone_number, transaction)
+        if transaction.get("_meta_added"):
+            return f"✅ Adicionei a meta *{transaction['meta']}* ao menu da planilha.\n\n{next_response}"
+        return next_response
     elif field == "conta":
         choice = _match_account_option(reply, options.get("accounts", []))
         added = False

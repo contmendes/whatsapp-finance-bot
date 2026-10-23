@@ -429,6 +429,40 @@ class SheetsHandler:
             print(f"[Google Sheets] erro ao ler metas disponíveis: {error}")
             return []
 
+    def add_meta_option(self, meta):
+        """Adiciona uma nova meta à mesma lista usada pelo menu suspenso."""
+        if not self.service or not self.spreadsheet_id:
+            return False, "", False, "❌ Google Sheets não está configurado."
+        name = " ".join(str(meta or "").split())
+        if len(name) < 2 or len(name) > 80 or any(ord(char) < 32 for char in name):
+            return False, "", False, "❌ O nome da meta precisa ter entre 2 e 80 caracteres."
+        try:
+            with self._write_lock:
+                existing = self.match_option(name, self.get_meta_options())
+                if existing:
+                    return True, existing, False, ""
+                values = self.service.spreadsheets().values().get(
+                    spreadsheetId=self.spreadsheet_id,
+                    range="'Metas e Limites'!G3:G42",
+                ).execute().get("values", [])
+                target_row = next(
+                    (index for index in range(3, 43)
+                     if index - 3 >= len(values) or not str(values[index - 3][0] or "").strip()),
+                    None,
+                )
+                if target_row is None:
+                    return False, "", False, "❌ A lista de metas está cheia; não consegui adicionar essa opção."
+                self.service.spreadsheets().values().update(
+                    spreadsheetId=self.spreadsheet_id,
+                    range=f"'Metas e Limites'!G{target_row}",
+                    valueInputOption="RAW",
+                    body={"values": [[name]]},
+                ).execute()
+            return True, name, True, ""
+        except Exception as error:
+            print(f"[Google Sheets] erro ao adicionar meta: {error}")
+            return False, "", False, "❌ Não consegui adicionar essa meta à planilha. Verifique se ela permite edição e tente novamente."
+
     def get_transaction_options(self):
         return {
             "categories": self.get_category_options(),
