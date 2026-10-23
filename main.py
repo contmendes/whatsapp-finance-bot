@@ -206,7 +206,11 @@ def _prepare_transaction(transaction):
     category = _match_choice(transaction.get("categoria"), options.get("categories", []))
     category_is_generic = category and _normalize_choice(category) in ("outro", "outros", "outras despesas")
     category_was_said = category and _normalize_choice(category) in raw
-    minimum_category_confidence = 0.75 if category_is_generic else 0.55
+    # Categorias específicas podem ser aceitas com confiança moderada: o Gemini
+    # normalmente reconhece a intenção mesmo quando o nome exato da categoria
+    # não aparece na mensagem (ex.: "almoço" -> Alimentação). Mantemos uma
+    # barreira maior para "Outro", para não esconder classificações incertas.
+    minimum_category_confidence = 0.70 if category_is_generic else 0.40
     if category and (category_was_said or confidence >= minimum_category_confidence):
         transaction["categoria"] = category
     else:
