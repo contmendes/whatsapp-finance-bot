@@ -119,6 +119,54 @@ def _match_choice(value, options, allow_unique_partial=False):
     return None
 
 
+def _numbered_option(value, options):
+    key = _normalize_choice(value)
+    match = re.fullmatch(r"(?:opcao\s*)?(\d+)", key)
+    if not match:
+        return None
+    index = int(match.group(1)) - 1
+    return options[index] if 0 <= index < len(options) else None
+
+
+def _is_numbered_selection(value):
+    return bool(re.fullmatch(r"(?:opcao\s*)?\d+", _normalize_choice(value)))
+
+
+def _format_numbered_options(options):
+    return "\n".join(f"{index}. {option}" for index, option in enumerate(options, start=1))
+
+
+def _infer_category_from_message(message, options):
+    text = _normalize_choice(message)
+    categories = [str(option) for option in options if str(option).strip()]
+    rules = [
+        (("supermercado", "mercearia", "hortifruti", "mercado"), ("mercado", "alimentacao")),
+        (("almoco", "jantar", "restaurante", "lanche", "padaria", "cafe", "ifood", "delivery"),
+         ("alimentacao", "refeicao", "restaurante")),
+        (("gasolina", "combustivel", "uber", "taxi", "onibus", "metro", "estacionamento", "pedagio", "99"),
+         ("transporte",)),
+        (("farmacia", "remedio", "medico", "consulta", "exame", "dentista", "hospital", "terapia"),
+         ("saude",)),
+        (("curso", "escola", "faculdade", "material escolar", "livro escolar"), ("educacao",)),
+        (("aluguel", "condominio", "conta de luz", "conta de agua", "gas de cozinha"),
+         ("moradia", "habitacao", "despesas da casa")),
+        (("netflix", "spotify", "amazon prime", "streaming", "assinatura"),
+         ("assinaturas", "servicos digitais")),
+        (("cinema", "teatro", "show", "viagem", "hotel", "passeio"), ("lazer", "viagem")),
+    ]
+    for keywords, targets in rules:
+        if not any(re.search(rf"\b{re.escape(keyword)}\b", text) for keyword in keywords):
+            continue
+        for target in targets:
+            exact = next((name for name in categories if _normalize_choice(name) == target), None)
+            if exact:
+                return exact
+            matches = [name for name in categories if target in _normalize_choice(name)]
+            if matches:
+                return min(matches, key=len)
+    return None
+
+
 def _match_payment_option(value, options, account=""):
     key = _normalize_choice(value)
     if not key:
@@ -198,23 +246,34 @@ def _resolve_account(transaction, options):
 def _prepare_transaction(transaction):
     options = sheets.get_transaction_options()
     transaction["_options"] = options
-    confidence = float(transaction.get("_ai_confidence") or 0)
+    category_confidence = transaction.get("_category_confidence")
+    if category_confidence is None:
+        category_confidence = transaction.get("_ai_confidence") or 0
+    confidence = float(category_confidence)
     raw = _normalize_choice(transaction.get("raw_message"))
     scope = transaction.get("tipo") if transaction.get("tipo") in ("PF", "PJ") else _scope_from_text(transaction.get("raw_message"))
     transaction["tipo"] = scope
 
-    category = _match_choice(transaction.get("categoria"), options.get("categories", []))
+    categories = options.get("categories", [])
+    category = _match_choice(transaction.get("categoria"), categories, allow_unique_partial=True)
     category_is_generic = category and _normalize_choice(category) in ("outro", "outros", "outras despesas")
     category_was_said = category and _normalize_choice(category) in raw
-    # Categorias específicas podem ser aceitas com confiança moderada: o Gemini
-    # normalmente reconhece a intenção mesmo quando o nome exato da categoria
-    # não aparece na mensagem (ex.: "almoço" -> Alimentação). Mantemos uma
-    # barreira maior para "Outro", para não esconder classificações incertas.
-    minimum_category_confidence = 0.70 if category_is_generic else 0.40
+    if category_is_generic and not category_was_said:
+        category = None
+    if not category:
+        category = _infer_category_from_message(transaction.get("raw_message"), categories)
+        if category:
+            confidence = max(confidence, 0.75)
+            transaction["_category_confidence"] = confidence
+    category_is_generic = category and _normalize_choice(category) in ("outro", "outros", "outras despesas")
+    category_was_said = category and _normalize_choice(category) in raw
+    # Use a confiança específica da categoria, separada da confiança dos outros campos.
+    # A barreira mais alta para "Outro" evita registrar uma classificação genérica à toa.
+    minimum_category_confidence = 0.75 if category_is_generic else 0.45
     if category and (category_was_said or confidence >= minimum_category_confidence):
         transaction["categoria"] = category
     else:
-        transaction["_suggested_category"] = category
+        transaction["_suggested_category"] = category if not category_is_generic else ""
         transaction["categoria"] = ""
     if not options.get("categories") and not transaction.get("categoria"):
         transaction["categoria"] = "Outro"
@@ -270,11 +329,14 @@ def _transaction_question(transaction, field):
         return "Esse lançamento é de Pessoa Física ou da empresa? Responda *PF* ou *PJ*."
     if field == "categoria":
         suggestion = transaction.get("_suggested_category")
+        categories = options.get("categories", [])
+        choices = _format_numbered_options(categories)
+        options_text = f"\n\nOpções disponíveis:\n{choices}" if choices else ""
         if suggestion:
-            return (f"Qual categoria devo usar? Minha sugestão é *{suggestion}*. Responda *SIM* para aceitar, "
-                    "ou escreva outra categoria. Se ela ainda não existir, vou adicioná-la ao plano de contas.")
-        return ("Qual categoria devo usar? Escreva o nome. Se ainda não existir na planilha, "
-                "vou adicioná-la ao plano de contas e à lista de categorias.")
+            return (f"Minha sugestão é *{suggestion}*. Responda *SIM* para aceitar ou escolha pelo número/nome. "
+                    "Se nenhuma servir, escreva a nova categoria." + options_text)
+        return ("Não consegui classificar com segurança. Escolha a categoria pelo número/nome. "
+                "Se nenhuma servir, escreva uma nova categoria para adicioná-la à planilha." + options_text)
     if field == "meta":
         goals = options.get("goals", [])
         labels = " / ".join(goals) if goals else "nenhuma meta disponível"
@@ -282,11 +344,14 @@ def _transaction_question(transaction, field):
     if field == "conta":
         accounts = options.get("accounts", [])
         new_account = transaction.get("_new_account_candidate")
-        if new_account:
-            return (f"Não encontrei *{new_account}* no menu de contas. Envie o nome como deseja que apareça "
-                    "na planilha (por exemplo, *C6 Pessoal* ou *C6 Empresa*) e vou adicioná-lo."
-                    + (" Opções atuais: " + " | ".join(accounts) if accounts else ""))
-        return "Qual conta devo usar? Responda com uma opção: " + " | ".join(accounts) + "\nSe nenhuma servir, escreva o nome da nova conta para adicioná-la."
+        choices = _format_numbered_options(accounts)
+        options_text = f"\n\nOpções atuais:\n{choices}" if choices else "\nAinda não há contas no menu."
+        if new_account and not transaction.get("_account_add_declined"):
+            return (f"Não encontrei *{new_account}* no menu de contas. Deseja adicioná-la ou prefere escolher "
+                    "uma das opções atuais? Responda *ADICIONAR* para cadastrar essa conta ou envie o número/nome "
+                    "de uma opção." + options_text)
+        return ("Qual conta devo usar? Responda pelo número ou nome de uma opção. Se nenhuma servir, escreva "
+                "o nome da conta que deseja adicionar." + options_text)
     if field == "forma_pagamento":
         suggestion = transaction.get("_suggested_payment_method") or ""
         account = transaction.get("conta") or ""
@@ -415,9 +480,17 @@ def _continue_transaction(phone_number, reply):
         return _advance_transaction(phone_number, transaction)
     elif field == "categoria":
         suggestion = transaction.get("_suggested_category")
-        choice = suggestion if answer in ("sim", "confirmo") and suggestion else _match_choice(reply, options.get("categories", []), allow_unique_partial=True)
+        categories = options.get("categories", [])
+        if answer in ("categorias", "categoria", "lista", "ver opcoes", "opcoes"):
+            return _transaction_question(transaction, field)
+        choice = suggestion if answer in ("sim", "confirmo") and suggestion else (
+            _numbered_option(reply, categories)
+            or _match_choice(reply, categories, allow_unique_partial=True)
+        )
         category_created = False
         if not choice:
+            if _is_numbered_selection(reply):
+                return _transaction_question(transaction, field)
             if answer in ("sim", "confirmo", "nao", "nao sei", "nao tenho") or answer.startswith("nao "):
                 return _transaction_question(transaction, field)
             added, category_name, category_created, error_message = sheets.add_category_to_plan(
@@ -452,14 +525,26 @@ def _continue_transaction(phone_number, reply):
             return f"✅ Adicionei a meta *{transaction['meta']}* ao menu da planilha.\n\n{next_response}"
         return next_response
     elif field == "conta":
-        choice = _match_account_option(reply, options.get("accounts", []))
+        accounts = options.get("accounts", [])
+        choice = _numbered_option(reply, accounts) or _match_account_option(reply, accounts)
         added = False
         if choice is None:
-            if answer in ("nao", "não", "nao sei", "nao tenho") or answer.startswith("nao "):
+            if _is_numbered_selection(reply):
                 return _transaction_question(transaction, field)
-            new_name = transaction.get("_new_account_candidate", "") if answer in ("sim", "confirmo", "adicionar") else " ".join(str(reply).split())
-            if answer in ("sim", "confirmo", "adicionar") and new_name:
+            if answer in ("nao", "nao sei", "nao tenho", "escolher", "escolher uma", "opcoes", "opcoes atuais", "existente") or answer.startswith("nao "):
+                if transaction.get("_new_account_candidate"):
+                    transaction["_account_add_declined"] = True
+                return _transaction_question(transaction, field)
+            candidate = transaction.get("_new_account_candidate", "")
+            if answer in ("sim", "confirmo", "adicionar"):
+                if not candidate:
+                    return _transaction_question(transaction, field)
+                new_name = candidate
                 new_name = _payment_option_name(new_name, "Pessoal" if transaction.get("tipo") == "PF" else "Empresa")
+            elif answer.startswith("adicionar "):
+                new_name = " ".join(str(reply).split()[1:])
+            else:
+                new_name = " ".join(str(reply).split())
             if not new_name:
                 return _transaction_question(transaction, field)
             ok, account_name, added, error_message = sheets.add_account_option(new_name)
@@ -469,6 +554,7 @@ def _continue_transaction(phone_number, reply):
             transaction["_account_added"] = added
         transaction["conta"] = choice
         transaction["_new_account_candidate"] = ""
+        transaction["_account_add_declined"] = False
         payment_candidate = transaction.get("_suggested_payment_method")
         if payment_candidate:
             payment = _match_payment_option(payment_candidate, options.get("payment_methods", []), choice)
@@ -609,6 +695,7 @@ def process_media_message(phone_number, message, contact_name="", message_id="")
             "banco": result.get("banco") or "",
             "forma_pagamento": result.get("forma_pagamento") or "",
             "_ai_confidence": result.get("confidence", 0),
+            "_category_confidence": result.get("categoria_confidence"),
             "contact_name": contact_name,
             "message_id": message_id,
             "needs_confirmation": True,
@@ -719,6 +806,7 @@ def process_user_message(phone_number, message_text, contact_name="", message_id
                 "banco": interpreted.get("banco") or bank,
                 "forma_pagamento": interpreted.get("forma_pagamento") or payment,
                 "_ai_confidence": confidence,
+                "_category_confidence": interpreted.get("categoria_confidence") if interpreted else None,
                 "contact_name": contact_name,
                 "message_id": message_id,
             }
@@ -761,6 +849,7 @@ def process_user_message(phone_number, message_text, contact_name="", message_id
                     "banco": (interpreted or {}).get("banco") or bank,
                     "forma_pagamento": (interpreted or {}).get("forma_pagamento") or payment,
                     "_ai_confidence": confidence,
+                    "_category_confidence": (interpreted or {}).get("categoria_confidence"),
                     "contact_name": contact_name,
                     "message_id": message_id,
                 }

@@ -41,12 +41,14 @@ Não invente dados. Se um campo não estiver claro, use null e reduza confidence
 Mantenha a separação PF/PJ: tipo deve ser PF ou PJ apenas quando a fala, legenda ou comprovante trouxer evidência clara; caso contrário, use null para que a assistente pergunte.
 Categorias para classificar: {category_text}
 Opções exatas permitidas pela planilha: {options_text}
-Categoria deve ser um item de options.categories. Conta e meta devem ser opções exatas ou null.
+Escolha a categoria pelo significado do gasto/receita, mesmo quando a mensagem usar sinônimos (por exemplo, almoço/restaurante -> Alimentação, gasolina/Uber -> Transporte, farmácia/remédio -> Saúde). Prefira uma categoria específica existente. Use somente um item exato de options.categories; use null apenas se a descrição não permitir uma escolha defensável.
+Informe categoria_confidence de 0 a 1 para a confiança especificamente na categoria, independente dos outros campos. Só dê valor baixo quando houver dúvida real entre categorias ou faltar contexto.
+Conta e meta devem ser opções exatas ou null.
 Forma de pagamento deve ser uma opção exata se existir; se a pessoa mencionar explicitamente uma forma que não esteja na lista, retorne o nome dito, sem inventar, para a assistente confirmar/adicionar. Se não mencionar, use null.
 Status deve ser exatamente Recebido, A receber, Pago ou A pagar, ou null se não for possível inferir.
 Em áudio, transcreva integralmente a fala relevante no campo transcricao. Em imagem sem legenda, use OCR/descrição breve no campo descricao.
 Responda SOMENTE JSON válido com exatamente este formato:
-{{"tipo":"PF ou PJ ou null","movimento":"DESPESA, RECEITA ou INVESTIMENTO","valor":number|null,"moeda":"BRL","data":"YYYY-MM-DD ou null","estabelecimento":"string ou null","descricao":"string","categoria":"string ou null","conta":"string ou null","meta":"string ou null","status":"Recebido, A receber, Pago, A pagar ou null","banco":"string ou null","forma_pagamento":"string ou null","confidence":number,"transcricao":"string ou null"}}
+{{"tipo":"PF ou PJ ou null","movimento":"DESPESA, RECEITA ou INVESTIMENTO","valor":number|null,"moeda":"BRL","data":"YYYY-MM-DD ou null","estabelecimento":"string ou null","descricao":"string","categoria":"string ou null","categoria_confidence":number,"conta":"string ou null","meta":"string ou null","status":"Recebido, A receber, Pago, A pagar ou null","banco":"string ou null","forma_pagamento":"string ou null","confidence":number,"transcricao":"string ou null"}}
 """
         body = {
             "contents": [{"parts": [
@@ -67,6 +69,7 @@ Responda SOMENTE JSON válido com exatamente este formato:
                         "estabelecimento": {"type": "STRING", "nullable": True},
                         "descricao": {"type": "STRING"},
                         "categoria": {"type": "STRING", "nullable": True},
+                        "categoria_confidence": {"type": "NUMBER"},
                         "conta": {"type": "STRING", "nullable": True},
                         "meta": {"type": "STRING", "nullable": True},
                         "status": {"type": "STRING", "nullable": True, "enum": ["Recebido", "A receber", "Pago", "A pagar"]},
@@ -75,7 +78,7 @@ Responda SOMENTE JSON válido com exatamente este formato:
                         "confidence": {"type": "NUMBER"},
                         "transcricao": {"type": "STRING", "nullable": True},
                     },
-                    "required": ["tipo", "movimento", "valor", "moeda", "data", "estabelecimento", "descricao", "categoria", "conta", "meta", "status", "banco", "forma_pagamento", "confidence", "transcricao"],
+                    "required": ["tipo", "movimento", "valor", "moeda", "data", "estabelecimento", "descricao", "categoria", "categoria_confidence", "conta", "meta", "status", "banco", "forma_pagamento", "confidence", "transcricao"],
                 },
             },
         }
@@ -92,6 +95,11 @@ Responda SOMENTE JSON válido com exatamente este formato:
                 return None, "Não consegui identificar um valor com segurança."
             result["tipo"] = result.get("tipo") if result.get("tipo") in ("PF", "PJ") else None
             result["confidence"] = float(result.get("confidence") or 0)
+            result["categoria_confidence"] = float(
+                result.get("categoria_confidence")
+                if result.get("categoria_confidence") is not None
+                else result["confidence"]
+            )
             return result, None
         except (KeyError, ValueError, TypeError, requests.RequestException) as error:
             print(f"[Gemini] erro ao interpretar arquivo: {error}")
@@ -110,11 +118,11 @@ Não execute ações; apenas classifique a intenção e extraia os dados.
 A separação PF/PJ é obrigatória. Em lançamento, tipo deve ser PF ou PJ somente quando houver evidência clara no texto (por exemplo, PF/pessoal ou PJ/empresa); caso contrário, retorne null para que a assistente pergunte.
 Categorias para classificar: {category_text}
 Opções exatas permitidas pela planilha: {options_text}
-Em lançamento, escolha categoria, conta, meta, forma_pagamento e status somente dessas opções quando houver correspondência. Para categoria, use o significado e o contexto da descrição, não apenas palavras idênticas: almoço, jantar, restaurante e supermercado normalmente indicam Alimentação; gasolina, combustível, ônibus, metrô e estacionamento indicam Transporte; médico, consulta, remédio e farmácia indicam Saúde; escola, curso e faculdade indicam Educação; cinema, viagem e entretenimento indicam Lazer; aluguel, condomínio e contas da casa indicam Moradia; Netflix, Spotify e serviços recorrentes indicam Assinaturas. Só use Outro quando nenhuma categoria específica for defensável e reduza confidence quando houver mais de uma interpretação plausível. Se o usuário mencionar explicitamente uma forma de pagamento que não esteja na lista, devolva o nome dito pelo usuário em forma_pagamento para o bot confirmar/adicionar; se não mencionar, use null.
+Em lançamento, escolha conta, meta, forma_pagamento e status somente dessas opções quando houver correspondência. Para categoria, escolha sempre a opção existente que melhor representa o significado da descrição, mesmo se a pessoa usar sinônimos; não exija que o texto repita o nome da categoria. Só use null quando a descrição não permitir uma escolha defensável e só use Outro quando nenhuma categoria específica fizer sentido. Devolva categoria_confidence de 0 a 1, específica para a categoria e independente da confiança nos demais campos; use valor baixo apenas se houver dúvida real entre categorias ou faltar contexto. Se o usuário mencionar explicitamente uma forma de pagamento que não esteja na lista, devolva o nome dito pelo usuário em forma_pagamento para o bot confirmar/adicionar; se não mencionar, use null.
 Meta só deve ser associada quando a mensagem der evidência clara; caso contrário use null.
 Mensagem: {message}
 Responda SOMENTE JSON com este formato:
-{{"intent":"launch|summary|balance|search|profile|categories|switch_context|help|delete_last|edit_last|unknown","tipo":"PF ou PJ ou null","movimento":"DESPESA|RECEITA|INVESTIMENTO","valor":number|null,"data":"YYYY-MM-DD ou null","categoria":"string ou null","conta":"string ou null","meta":"string ou null","status":"Recebido|A receber|Pago|A pagar ou null","descricao":"string","banco":"string","forma_pagamento":"string ou null","keyword":"string","mes":"YYYY-MM ou todos","contexto":"PF ou PJ","confidence":number,"reply":"string"}}
+{{"intent":"launch|summary|balance|search|profile|categories|switch_context|help|delete_last|edit_last|unknown","tipo":"PF ou PJ ou null","movimento":"DESPESA|RECEITA|INVESTIMENTO","valor":number|null,"data":"YYYY-MM-DD ou null","categoria":"string ou null","categoria_confidence":number,"conta":"string ou null","meta":"string ou null","status":"Recebido|A receber|Pago|A pagar ou null","descricao":"string","banco":"string","forma_pagamento":"string ou null","keyword":"string","mes":"YYYY-MM ou todos","contexto":"PF ou PJ","confidence":number,"reply":"string"}}
 """
         body = {
             "contents": [{"parts": [{"text": prompt}]}],
@@ -130,6 +138,7 @@ Responda SOMENTE JSON com este formato:
                         "valor": {"type": "NUMBER", "nullable": True},
                         "data": {"type": "STRING", "nullable": True},
                         "categoria": {"type": "STRING", "nullable": True},
+                        "categoria_confidence": {"type": "NUMBER"},
                         "conta": {"type": "STRING", "nullable": True},
                         "meta": {"type": "STRING", "nullable": True},
                         "status": {"type": "STRING", "nullable": True, "enum": ["Recebido", "A receber", "Pago", "A pagar"]},
@@ -142,7 +151,7 @@ Responda SOMENTE JSON com este formato:
                         "confidence": {"type": "NUMBER"},
                         "reply": {"type": "STRING"},
                     },
-                    "required": ["intent", "tipo", "movimento", "valor", "data", "categoria", "conta", "meta", "status", "descricao", "banco", "forma_pagamento", "keyword", "mes", "contexto", "confidence", "reply"],
+                    "required": ["intent", "tipo", "movimento", "valor", "data", "categoria", "categoria_confidence", "conta", "meta", "status", "descricao", "banco", "forma_pagamento", "keyword", "mes", "contexto", "confidence", "reply"],
                 },
             },
         }
@@ -156,6 +165,11 @@ Responda SOMENTE JSON com este formato:
             text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip(), flags=re.I)
             result = json.loads(text)
             result["confidence"] = float(result.get("confidence") or 0)
+            result["categoria_confidence"] = float(
+                result.get("categoria_confidence")
+                if result.get("categoria_confidence") is not None
+                else result["confidence"]
+            )
             if result.get("tipo") not in ("PF", "PJ"):
                 result["tipo"] = None
             if result.get("contexto") not in ("PF", "PJ"):

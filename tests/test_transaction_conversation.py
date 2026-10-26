@@ -66,8 +66,42 @@ class TransactionConversationTests(unittest.TestCase):
         }
         with patch.object(main.sheets, "get_transaction_options", return_value=OPTIONS):
             reply = main._start_transaction("phone", transaction)
-        self.assertIn("Qual categoria", reply)
+        self.assertIn("Minha sugestão é *Mercado*", reply)
+        self.assertIn("Opções disponíveis", reply)
+        self.assertIn("1. Alimentação", reply)
         self.assertEqual(main.pending_transactions["phone"]["awaiting"], "categoria")
+
+    def test_semantic_category_inference_avoids_follow_up(self):
+        no_optional_choices = {**OPTIONS, "accounts": [], "payment_methods": [], "goals": []}
+        transaction = {
+            "tipo": "PF", "movimento": "DESPESA", "valor": 52,
+            "categoria": None, "status": "Pago", "raw_message": "Paguei R$ 52 no almoço",
+            "_ai_confidence": 0,
+        }
+        with patch.object(main.sheets, "get_transaction_options", return_value=no_optional_choices), \
+             patch.object(main.sheets, "add_transaction", return_value=(True, "saved")) as save:
+            reply = main._start_transaction("phone", transaction)
+
+        self.assertEqual(reply, "saved")
+        self.assertEqual(save.call_args.args[2], "Alimentação")
+        self.assertNotIn("phone", main.pending_transactions)
+
+    def test_category_question_shows_options_and_accepts_number(self):
+        no_optional_choices = {**OPTIONS, "accounts": [], "payment_methods": [], "goals": []}
+        transaction = {
+            "tipo": "PF", "movimento": "DESPESA", "valor": 30,
+            "categoria": None, "status": "Pago", "raw_message": "Gastei R$ 30 em uma coisa",
+            "_ai_confidence": 0,
+        }
+        with patch.object(main.sheets, "get_transaction_options", return_value=no_optional_choices), \
+             patch.object(main.sheets, "add_transaction", return_value=(True, "saved")) as save:
+            question = main._start_transaction("phone", transaction)
+            reply = main._continue_transaction("phone", "2")
+
+        self.assertIn("Opções disponíveis", question)
+        self.assertIn("2. Mercado", question)
+        self.assertEqual(reply, "saved")
+        self.assertEqual(save.call_args.args[2], "Mercado")
 
     def test_expense_cannot_use_income_status(self):
         no_optional_choices = {**OPTIONS, "accounts": [], "goals": []}
@@ -99,7 +133,7 @@ class TransactionConversationTests(unittest.TestCase):
              patch.object(main.sheets, "add_category_to_plan", return_value=(True, "Veterinário", True, "")) as add_category, \
              patch.object(main.sheets, "add_transaction", return_value=(True, "saved")) as save:
             first_reply = main._start_transaction("phone", transaction)
-            self.assertIn("Qual categoria", first_reply)
+            self.assertIn("Opções disponíveis", first_reply)
 
             final_reply = main._continue_transaction("phone", "Veterinário")
 
@@ -154,6 +188,8 @@ class TransactionConversationTests(unittest.TestCase):
              patch.object(main.sheets, "add_transaction", return_value=(True, "saved")) as save:
             question = main._start_transaction("phone", transaction)
             self.assertIn("C6", question)
+            self.assertIn("Deseja adicioná-la", question)
+            self.assertIn("Opções atuais", question)
             self.assertEqual(main.pending_transactions["phone"]["awaiting"], "conta")
             reply = main._continue_transaction("phone", "C6 Pessoal")
 
@@ -161,6 +197,26 @@ class TransactionConversationTests(unittest.TestCase):
         self.assertEqual(reply.splitlines()[-1], "saved")
         add_account.assert_called_once_with("C6 Pessoal")
         self.assertEqual(save.call_args.kwargs["account"], "C6 Pessoal")
+
+    def test_unknown_account_can_be_declined_and_selected_by_number(self):
+        options = {**OPTIONS, "accounts": ["Itaú", "Nubank Pessoal", "Inter Pessoal"], "goals": [], "payment_methods": []}
+        transaction = {
+            "tipo": "PF", "movimento": "DESPESA", "valor": 18,
+            "categoria": "Mercado", "status": "Pago", "raw_message": "Paguei R$ 18 no mercado com C6",
+            "banco": "C6", "_ai_confidence": 1.0,
+        }
+        with patch.object(main.sheets, "get_transaction_options", return_value=options), \
+             patch.object(main.sheets, "add_account_option") as add_account, \
+             patch.object(main.sheets, "add_transaction", return_value=(True, "saved")) as save:
+            question = main._start_transaction("phone", transaction)
+            declined = main._continue_transaction("phone", "Não, prefiro escolher")
+            reply = main._continue_transaction("phone", "3")
+
+        self.assertIn("Opções atuais", question)
+        self.assertIn("Qual conta devo usar?", declined)
+        self.assertEqual(reply, "saved")
+        add_account.assert_not_called()
+        self.assertEqual(save.call_args.kwargs["account"], "Inter Pessoal")
 
     def test_unknown_payment_method_is_confirmed_and_added_to_menu(self):
         options = {**OPTIONS, "goals": []}
