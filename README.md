@@ -41,6 +41,12 @@ O bot identifica as colunas pelos cabeçalhos, não pela posição. Ele preenche
 
 Na coluna `Descrição`, o bot guarda o texto completo enviado no WhatsApp; para áudio, usa a transcrição; para foto, usa a legenda ou o texto/descrição lido do comprovante. A coluna `ID` recebe um identificador numérico de 12 dígitos derivado do ID da mensagem, preservando a deduplicação sem expor o identificador longo do WhatsApp. O bot grava na primeira linha sem lançamento, começando na linha 2.
 
+### Planilha empresarial separada (opcional)
+
+O fluxo empresarial é desativado por padrão e usa variáveis próprias; não altera `SPREADSHEET_ID`, o fluxo PF/PJ nem os contatos não autorizados. Configure no Render `BUSINESS_SPREADSHEET_ID`, `BUSINESS_COST_CENTER_SHEETS` (nomes exatos das abas separados por vírgula) e `BUSINESS_CLIENT_PHONE_NUMBERS` (telefones WhatsApp de quem pode usar esse destino, com código do país). O mesmo número comercial do WhatsApp Cloud pode receber mensagens pessoais e empresariais, pois o roteamento usa o telefone do remetente.
+
+Para cada mensagem autorizada, o bot apresenta as abas de centro de custo e, se necessário, as opções atuais do Plano de Contas. Na estrutura empresarial confirmada, escreve somente B (Data), E (item do Plano de Contas), F (Tipo/motivo, por exemplo “contratos Isabella”), G (texto completo enviado) e H (Entradas) ou I (Saídas). Não escreve nas colunas C, D, J ou K, preservando validações e fórmulas. A conta de serviço do Google usada em `GOOGLE_CREDENTIALS_JSON` precisa ter permissão de Editor também na planilha empresarial.
+
 ## Render
 
 - **Build command:** `pip install -r requirements.txt`

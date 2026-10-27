@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 from flask import Flask, jsonify, render_template, request
 
 from categories import get_categories_text
+from business_flow import BusinessFlow
 from gemini_handler import GeminiHandler
 from sheets_handler import SheetsHandler
 from whatsapp_handler import WhatsAppHandler
@@ -25,6 +26,15 @@ whatsapp = WhatsAppHandler(
 )
 sheets = SheetsHandler()
 gemini = GeminiHandler()
+business_spreadsheet_id = os.getenv("BUSINESS_SPREADSHEET_ID", "").strip()
+business_centers = [item.strip() for item in os.getenv("BUSINESS_COST_CENTER_SHEETS", "").split(",") if item.strip()]
+business_client_numbers = {
+    re.sub(r"\D", "", item)
+    for item in os.getenv("BUSINESS_CLIENT_PHONE_NUMBERS", "").split(",")
+    if re.sub(r"\D", "", item)
+}
+business_sheets = SheetsHandler(spreadsheet_id=business_spreadsheet_id) if business_spreadsheet_id else None
+business_flow = BusinessFlow(business_sheets, gemini, whatsapp, business_centers) if business_sheets else None
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "")
 APP_SECRET = os.getenv("APP_SECRET", "")
 DASHBOARD_TOKEN = os.getenv("DASHBOARD_TOKEN", "").strip()
@@ -42,6 +52,10 @@ def _send_whatsapp_reply(phone_number, message, source):
             print(f"[WhatsApp] não foi possível enviar resposta (origem={source})")
     except Exception as error:
         print(f"[WhatsApp] exceção ao enviar resposta (origem={source}): {error}")
+
+
+def _is_business_client(phone_number):
+    return bool(business_flow and business_centers and re.sub(r"\D", "", str(phone_number)) in business_client_numbers)
 
 
 def _run_message_worker(processor, args, message_id):
@@ -672,6 +686,25 @@ def process_media_message(phone_number, message, contact_name="", message_id="")
     try:
         media = message.get(message.get("type"), {})
         media_bytes, mime_type = download_whatsapp_media(media.get("id"))
+        if _is_business_client(phone_number):
+            result, error = gemini.extract_transaction(
+                media_bytes, mime_type, "PJ", {}, {"categories": []}
+            )
+            if error or not result:
+                _send_whatsapp_reply(phone_number, f"📎 {error or 'Não consegui ler o arquivo.'}", "mídia empresarial")
+                return
+            caption = str(media.get("caption") or "").strip()
+            raw_message = caption or result.get("transcricao") or result.get("descricao") or "Mídia enviada pelo WhatsApp"
+            transaction = {
+                "valor": result.get("valor"),
+                "data": result.get("data"),
+                "movimento": result.get("movimento"),
+                "descricao": result.get("descricao") or result.get("estabelecimento") or "",
+                "descricao_tipo": result.get("descricao_tipo") or "",
+            }
+            response = business_flow.process_media(phone_number, transaction, raw_message, message_id)
+            _send_whatsapp_reply(phone_number, response, "mídia empresarial")
+            return
         profile = sheets.get_profile(phone_number, contact_name)
         categories = sheets.get_categories()
         options = sheets.get_transaction_options()
@@ -708,6 +741,10 @@ def process_media_message(phone_number, message, contact_name="", message_id="")
 
 def process_user_message(phone_number, message_text, contact_name="", message_id=""):
     message_upper = message_text.upper().strip()
+    if _is_business_client(phone_number):
+        response = business_flow.process(phone_number, message_text, message_id)
+        _send_whatsapp_reply(phone_number, response, "fluxo empresarial")
+        return
     if message_upper == "AJUDA":
         _send_whatsapp_reply(phone_number, whatsapp.get_help_message(), "ajuda")
         return
