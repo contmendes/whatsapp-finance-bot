@@ -30,17 +30,21 @@ HEADER_ALIASES = {
 
 
 class SheetsHandler:
-    def __init__(self):
-        self.service = None
-        self.credentials = None
+    def __init__(self, spreadsheet_id=None, service=None, credentials=None):
+        self.service = service
+        self.credentials = credentials
         # Compatibilidade com a planilha usada pelas versões anteriores do bot.
-        self.spreadsheet_id = os.getenv("SPREADSHEET_ID", NEW_SPREADSHEET_ID)
+        self.spreadsheet_id = (
+            spreadsheet_id if spreadsheet_id is not None
+            else os.getenv("SPREADSHEET_ID", NEW_SPREADSHEET_ID)
+        )
         self._dashboard_cache = {}
         self._write_lock = Lock()
         self._processed_message_ids = set()
         self._config_cache = None
         self._config_cache_time = 0
-        self._authenticate()
+        if self.service is None:
+            self._authenticate()
 
     def _authenticate(self):
         try:
@@ -472,6 +476,57 @@ class SheetsHandler:
             "statuses": list(STATUS_OPTIONS),
         }
 
+    def get_business_plan_options(self, center_sheet, plan_sheet="Plano de Contas"):
+        """Return the exact validation choices for the business plan-account cell."""
+        if not self.service or not self.spreadsheet_id:
+            return []
+        center_sheet = str(center_sheet or "").replace("'", "''")
+        try:
+            metadata = self.service.spreadsheets().get(
+                spreadsheetId=self.spreadsheet_id,
+                ranges=[f"'{center_sheet}'!E3"],
+                includeGridData=True,
+                fields="sheets(data(rowData(values(dataValidation))))",
+            ).execute()
+            validation = next(
+                (cell.get("dataValidation")
+                 for sheet in metadata.get("sheets", [])
+                 for grid in sheet.get("data", [])
+                 for row in grid.get("rowData", [])
+                 for cell in row.get("values", [])
+                 if cell.get("dataValidation")),
+                None,
+            )
+            if validation:
+                condition = validation.get("condition", {})
+                choices = condition.get("values", [])
+                if condition.get("type") == "ONE_OF_LIST":
+                    options = [str(item.get("userEnteredValue", "")).strip() for item in choices]
+                    options = [item for item in options if item]
+                    if options:
+                        return list(dict.fromkeys(options))
+                if condition.get("type") == "ONE_OF_RANGE" and choices:
+                    source_range = str(choices[0].get("userEnteredValue", "")).lstrip("=").strip()
+                    if source_range:
+                        rows = self.service.spreadsheets().values().get(
+                            spreadsheetId=self.spreadsheet_id, range=source_range
+                        ).execute().get("values", [])
+                        options = [str(cell).strip() for row in rows for cell in row if str(cell).strip()]
+                        if options:
+                            return list(dict.fromkeys(options))
+
+            # Fallback to the plan's description column when the API doesn't expose
+            # a validation rule on the first data row.
+            rows = self.service.spreadsheets().values().get(
+                spreadsheetId=self.spreadsheet_id,
+                range=f"'{plan_sheet}'!B2:B1000",
+            ).execute().get("values", [])
+            options = [str(row[0]).strip() for row in rows if row and str(row[0]).strip()]
+            return list(dict.fromkeys(options))
+        except Exception as error:
+            print(f"[Google Sheets] erro ao ler opções do plano empresarial: {error}")
+            return []
+
     def add_transaction(self, tipo_pj_pf, tipo_movimento, categoria, descricao, valor, phone_number="", contact_name="", message_id="", raw_message="", transaction_date=None, bank="", payment_method="", account="", meta="", status="", category_added=False):
         if not self.service or not self.spreadsheet_id:
             return False, "❌ Google Sheets não está configurado no Render."
@@ -569,6 +624,73 @@ class SheetsHandler:
         except Exception as error:
             print(f"[Google Sheets] erro ao adicionar transação: {error}")
             return False, "❌ Não consegui salvar na planilha. Verifique o acesso da conta de serviço."
+
+    def add_business_transaction(self, center_sheet, movement, plan_account, type_description,
+                                 description, value, transaction_date=None, message_id="",
+                                 plan_options=None, allowed_centers=None):
+        """Write an itemized business movement without touching formula columns."""
+        if not self.service or not self.spreadsheet_id:
+            return False, "❌ A planilha empresarial ainda não está configurada no bot."
+        center_sheet = str(center_sheet or "").strip()
+        if allowed_centers is not None and center_sheet not in allowed_centers:
+            return False, "❌ O centro de custo selecionado não está autorizado."
+        if not center_sheet:
+            return False, "❌ Não foi selecionado um centro de custo."
+        try:
+            options = list(plan_options or self.get_business_plan_options(center_sheet))
+            matched_plan = self.match_option(plan_account, options)
+            if not matched_plan:
+                return False, "❌ O plano de contas precisa corresponder a uma opção válida da planilha."
+            type_description = " ".join(str(type_description or "").split())
+            description = " ".join(str(description or "").split())
+            if not type_description:
+                return False, "❌ Informe o motivo/tipo do lançamento."
+            amount = float(value or 0)
+            if amount <= 0:
+                return False, "❌ O valor do lançamento deve ser maior que zero."
+
+            date_text = str(transaction_date or "").strip()[:10]
+            try:
+                date_value = datetime.strptime(date_text, "%Y-%m-%d") if date_text else datetime.now()
+            except ValueError:
+                date_value = self._parse_date(transaction_date) or datetime.now()
+            movement_key = self._normal_header(movement)
+            is_income = movement_key in ("receita", "entrada", "e")
+            sheet_name = center_sheet.replace("'", "''")
+            with self._write_lock:
+                if message_id and message_id in self._processed_message_ids:
+                    return True, "✅ Esta mensagem já foi processada; não registrei novamente."
+                rows = self.service.spreadsheets().values().get(
+                    spreadsheetId=self.spreadsheet_id,
+                    range=f"'{sheet_name}'!B3:K",
+                ).execute().get("values", [])
+                last_data_row = 2
+                # B/E/F/G/H/I are user-input columns. Ignore C/D/J/K formulas.
+                input_indexes = (0, 3, 4, 5, 6, 7)
+                for row_number, row in enumerate(rows, start=3):
+                    if any(index < len(row) and str(row[index] or "").strip() for index in input_indexes):
+                        last_data_row = row_number
+                next_row = last_data_row + 1
+                entries = [
+                    {"range": f"'{sheet_name}'!B{next_row}", "values": [[date_value.strftime('%d/%m/%Y')]]},
+                    {"range": f"'{sheet_name}'!E{next_row}", "values": [[matched_plan]]},
+                    {"range": f"'{sheet_name}'!F{next_row}", "values": [[type_description]]},
+                    {"range": f"'{sheet_name}'!G{next_row}", "values": [[description]]},
+                    {"range": f"'{sheet_name}'!{'H' if is_income else 'I'}{next_row}", "values": [[amount]]},
+                ]
+                self.service.spreadsheets().values().batchUpdate(
+                    spreadsheetId=self.spreadsheet_id,
+                    body={"valueInputOption": "USER_ENTERED", "data": entries},
+                ).execute()
+                if message_id:
+                    self._processed_message_ids.add(message_id)
+
+            label = "entrada" if is_income else "saída"
+            return True, (f"✅ Registrado em *{center_sheet}*: {label} de R$ {amount:.2f} em "
+                          f"{date_value.strftime('%d/%m/%Y')} · {matched_plan} · {type_description}.")
+        except Exception as error:
+            print(f"[Google Sheets] erro ao adicionar movimento empresarial: {error}")
+            return False, "❌ Não consegui salvar na planilha empresarial. Verifique se a conta do bot tem acesso de edição."
 
     def get_summary(self, tipo_pj_pf):
         if not self.service or not self.spreadsheet_id:

@@ -45,6 +45,42 @@ class GeminiModelSelectionTests(unittest.TestCase):
         self.assertIn("categoria_confidence", schema["properties"])
         self.assertIn("categoria_confidence", schema["required"])
 
+    def test_interpret_business_text_restricts_plan_account_to_allowed_options(self):
+        class FakeResponse:
+            status_code = 200
+
+            @staticmethod
+            def json():
+                return {"candidates": [{"content": {"parts": [{
+                    "text": '{"movimento":"DESPESA","valor":30,"data":null,"plano_conta":"Contratos","descricao_tipo":"contratos Isabella","confidence":0.9}'
+                }]}}]}
+
+        with patch.dict("os.environ", {"GEMINI_API_KEY": "test-key", "GEMINI_MODEL": ""}), \
+             patch("gemini_handler.requests.post", return_value=FakeResponse()) as post:
+            handler = GeminiHandler()
+            result, error = handler.interpret_business_text(
+                "Paguei R$ 30 para contratos Isabella", ["Contratos", "Material"]
+            )
+
+        self.assertIsNone(error)
+        self.assertEqual(result["plano_conta"], "Contratos")
+        self.assertEqual(result["descricao_tipo"], "contratos Isabella")
+        prompt = post.call_args.kwargs["json"]["contents"][0]["parts"][0]["text"]
+        self.assertIn("Paguei R$ 30 para contratos Isabella", prompt)
+
+        class BadOptionResponse(FakeResponse):
+            @staticmethod
+            def json():
+                data = FakeResponse.json()
+                data["candidates"][0]["content"]["parts"][0]["text"] = data["candidates"][0]["content"]["parts"][0]["text"].replace("Contratos", "Item inexistente")
+                return data
+
+        with patch.dict("os.environ", {"GEMINI_API_KEY": "test-key", "GEMINI_MODEL": ""}), \
+             patch("gemini_handler.requests.post", return_value=BadOptionResponse()):
+            result, error = GeminiHandler().interpret_business_text("texto", ["Contratos"])
+        self.assertIsNone(error)
+        self.assertIsNone(result["plano_conta"])
+
 
 if __name__ == "__main__":
     unittest.main()
